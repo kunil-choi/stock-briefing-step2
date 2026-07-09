@@ -1,0 +1,30 @@
+# config/schedule.yml
+# briefing_type/video_format 및 이 레포의 실행 창(window)을 정의한다.
+# pipeline/config_schedule.py가 이 파일을 로드해 상수로 노출한다.
+
+briefing_type: report_update   # morning_core | report_update
+
+window:
+  start: "09:20"   # 이 시각 이전에 트리거되면 비정상(모니터링 기준)
+  end:   "10:20"   # 이 시각을 넘겨 완료되면 SLA 위반으로 로그에 경고 표시
+
+# pipeline/report_decision.py가 사용 — "핵심 종목 수 5개 미만 또는 신규성 낮음"
+# → video_format=shorts. 신규성 판단 자체(new_coverage=0 & simultaneous<=1)는
+# report_decision.py에 하드코딩돼 있으며, 후속 단계(F: 주도주 랭킹형 플롯의
+# ranking_score)에서 더 정교한 기준으로 교체될 예정이다.
+report_decision:
+  min_core_stocks: 5
+
+duration:
+  longform:
+    min_seconds: 780    # 13분
+    max_seconds: 1200   # 20분
+  shorts:
+    min_seconds: 30
+    max_seconds: 60
+
+# report_update의 기본값. 실제 video_format은 매 실행마다
+# report_decision.decide_video_format()이 결정해 script.json에 기록하고,
+# generate_metadata.py가 그 값을 우선 사용한다 — 이 값은 generate_script.py
+# 실행 전이나 report_decision import 실패 시의 안전한 폴백일 뿐이다.
+default_video_format: longform

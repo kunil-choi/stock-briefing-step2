@@ -1,0 +1,173 @@
+name: 📡 report_update 영상 생성 (09:20~10:20 KST)
+
+on:
+  # stock-briefing-v3-2가 완료 직후 dispatch로만 시작한다. 자체 cron을 두지
+  # 않는 이유는 stock-briefing-video의 daily_broadcast.yml과 동일 — V3_2가
+  # 끝나기 전에 실행되면 날짜 불일치 위험이 있다.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      video_format: ${{ steps.detect_format.outputs.video_format }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install openai playwright Pillow pandas matplotlib pykrx requests python-dotenv pyyaml
+          playwright install chromium
+      - env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python pipeline/generate_script.py KO
+      - name: video_format 감지 (report_decision.py가 script.json에 기록한 값)
+        id: detect_format
+        run: |
+          FORMAT=$(python -c "import json; print(json.load(open('output/KO/scripts/script.json')).get('video_format','longform'))")
+          echo "video_format=${FORMAT}" >> "$GITHUB_OUTPUT"
+          echo "감지된 video_format: ${FORMAT}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: script
+          path: output/KO/scripts/
+
+  voice:
+    needs: script
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install openai requests Pillow>=10.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: script
+          path: output/KO/scripts/
+      - env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python pipeline/generate_voice.py KO
+      - name: TTS 결과 검증 (video_format에 따라 최소 개수 다름)
+        env:
+          VIDEO_FORMAT: ${{ needs.script.outputs.video_format }}
+        run: |
+          echo "=== 생성된 오디오 파일 목록 ==="
+          ls -lh output/KO/audio/ || echo "audio 폴더 없음"
+          total=$(ls output/KO/audio/*.mp3 2>/dev/null | wc -l)
+          echo "총 MP3 파일 수: $total (video_format=${VIDEO_FORMAT})"
+          if [ "$VIDEO_FORMAT" = "shorts" ]; then
+            MIN_FILES=3   # opening / highlight / closing
+          else
+            MIN_FILES=5
+          fi
+          if [ "$total" -lt "$MIN_FILES" ]; then
+            echo "❌ MP3 파일이 너무 적습니다 ($total개 < ${MIN_FILES}개). TTS 실패 가능성."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice
+          path: output/KO/audio/
+
+  assets:
+    needs: [script]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-noto-cjk fonts-noto-cjk-extra ffmpeg
+          fc-cache -fv
+          pip install requests Pillow>=10.0.0 pykrx matplotlib pandas mplfinance python-dotenv playwright
+          playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: script
+          path: output/KO/scripts/
+      - run: python pipeline/generate_assets.py KO
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets
+          path: output/KO/frames/
+
+  video:
+    needs: [script, voice, assets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      VIDEO_FORMAT: ${{ needs.script.outputs.video_format }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-noto-cjk fonts-noto-cjk-extra ffmpeg libass-dev libass9
+          fc-cache -fv
+          pip install openai requests Pillow>=10.0.0 pyyaml playwright
+          playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: script
+          path: output/KO/scripts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: voice
+          path: output/KO/audio/
+      - uses: actions/download-artifact@v4
+        with:
+          name: assets
+          path: output/KO/frames/
+      - name: asset_map.json 생성
+        run: |
+          python - <<'PY'
+          import glob, json, os
+          frames = sorted(glob.glob('output/KO/frames/*.png'))
+          os.makedirs('output/KO', exist_ok=True)
+          json.dump({'frames': frames, 'lang': 'KO'}, open('output/KO/asset_map.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)
+          PY
+      - run: python pipeline/generate_subtitles.py KO
+      - name: 🎬 영상 합성 (video_format에 따라 목표 길이 다름)
+        run: |
+          if [ "$VIDEO_FORMAT" = "shorts" ]; then
+            export TARGET_MIN_SECONDS=30
+            export TARGET_MAX_SECONDS=60
+          else
+            export TARGET_MIN_SECONDS=780
+            export TARGET_MAX_SECONDS=1200
+          fi
+          echo "TARGET_MIN_SECONDS=${TARGET_MIN_SECONDS} / TARGET_MAX_SECONDS=${TARGET_MAX_SECONDS} (video_format=${VIDEO_FORMAT})"
+          python pipeline/generate_video.py KO
+      - name: 📋 YouTube 메타데이터 생성 (제목/설명/태그/썸네일)
+        run: python pipeline/generate_metadata.py KO
+      - name: ✅ 결과물 검증 (영상 길이 + metadata.json)
+        run: |
+          if [ "$VIDEO_FORMAT" = "shorts" ]; then
+            export TARGET_MIN_SECONDS=30
+            export TARGET_MAX_SECONDS=60
+          else
+            export TARGET_MIN_SECONDS=780
+            export TARGET_MAX_SECONDS=1200
+          fi
+          python pipeline/quality_gate.py KO
+      - name: 📦 배포 산출물 업로드 준비
+        run: |
+          DATE_DIR=$(TZ='Asia/Seoul' date +'%Y-%m-%d')
+          echo "DATE_DIR=${DATE_DIR}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report_update-${{ env.DATE_DIR }}
+          path: output/${{ env.DATE_DIR }}/
+          retention-days: 30
