@@ -17,8 +17,35 @@ OPENAI_VOICE = "nova"       # nova(여성) / onyx(남성) / alloy / echo / fable
 OPENAI_MODEL = "tts-1-hd"  # tts-1(빠름) / tts-1-hd(고품질)
 
 
+TTS_MOCK = os.environ.get("TTS_MOCK") == "1"
+
+
+def _mock_text_to_speech(text: str, output_path: str) -> bool:
+    """TTS_MOCK=1 드라이런 전용. 실제 TTS를 호출하지 않고, 텍스트 길이에
+    비례한 길이의 무음에 가까운 저음량 톤 mp3를 ffmpeg로 만든다(OpenAI 비용
+    없이 후속 파이프라인을 실제 오디오 파일로 검증하기 위함 —
+    stock-briefing-step1과 동일한 드라이런 스위치)."""
+    import subprocess
+    duration = max(1.0, len(text) / 5.5)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", f"sine=frequency=220:duration={duration:.2f}",
+        "-af", "volume=0.05",
+        "-c:a", "libmp3lame", "-b:a", "128k",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  ❌ [tts:mock] 더미 오디오 생성 실패: {result.stderr[-300:]}")
+        return False
+    return True
+
+
 def text_to_speech(text: str, output_path: str) -> bool:
     """OpenAI TTS로 텍스트를 MP3로 변환합니다."""
+    if TTS_MOCK:
+        return _mock_text_to_speech(text, output_path)
     try:
         from openai import OpenAI
     except ImportError:
@@ -91,10 +118,10 @@ def _build_jobs(sections: list, lang: str) -> list:
 def run(lang: str = "KO"):
     lang = lang.upper()
 
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not os.environ.get("OPENAI_API_KEY") and not TTS_MOCK:
         raise EnvironmentError("❌ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    print(f"🎙️ TTS 엔진: OpenAI TTS ({OPENAI_MODEL} / {OPENAI_VOICE})")
+    print(f"🎙️ TTS 엔진: {'MOCK(드라이런)' if TTS_MOCK else f'OpenAI TTS ({OPENAI_MODEL} / {OPENAI_VOICE})'}")
     print(f"📁 출력 언어: {lang}")
 
     script_path = f"output/{lang}/scripts/script.json"
