@@ -5,6 +5,13 @@ on:
   # 않는 이유는 stock-briefing-video의 daily_broadcast.yml과 동일 — V3_2가
   # 끝나기 전에 실행되면 날짜 불일치 위험이 있다.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          드라이런 모드 — OpenAI/TTS를 실제로 호출하지 않고
+          (SCRIPT_MOCK/TTS_MOCK) 파이프라인 전체를 무료로 검증만 한다.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +32,7 @@ jobs:
           playwright install chromium
       - env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SCRIPT_MOCK: ${{ inputs.dry_run && '1' || '' }}
         run: python pipeline/generate_script.py KO
       - name: video_format 감지 (report_decision.py가 script.json에 기록한 값)
         id: detect_format
@@ -53,6 +61,7 @@ jobs:
           path: output/KO/scripts/
       - env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TTS_MOCK: ${{ inputs.dry_run && '1' || '' }}
         run: python pipeline/generate_voice.py KO
       - name: TTS 결과 검증 (video_format에 따라 최소 개수 다름)
         env:
@@ -168,6 +177,6 @@ jobs:
           echo "DATE_DIR=${DATE_DIR}" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
-          name: report_update-${{ env.DATE_DIR }}
+          name: ${{ inputs.dry_run && format('dryrun-{0}', env.DATE_DIR) || format('report_update-{0}', env.DATE_DIR) }}
           path: output/${{ env.DATE_DIR }}/
           retention-days: 30
