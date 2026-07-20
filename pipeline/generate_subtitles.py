@@ -111,6 +111,9 @@ def _frame_stem_to_audio_id(stem: str, sections: list) -> str:
         (r'^00_opening$',           'opening'),
         (r'^01_market',             'market_summary'),
         (r'^02_sector',             'sectors'),
+        (r'^02_recap$',             'recap'),       # video_format in (mid, full) 전용
+        (r'^03_reaction$',          'reaction'),    # video_format in (mid, full) 전용
+        (r'^04_briefing$',          'briefing'),    # video_format in (mid, full) 전용
         (r'^05_highlight$',         'highlight'),   # video_format=="shorts" 전용
         (r'^90_extra_watchlist$',   'stock_추가관심종목'),
         (r'^91_today_pick$',        'stock_오늘의픽'),

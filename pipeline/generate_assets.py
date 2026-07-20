@@ -11,13 +11,10 @@ if _HERE not in sys.path:
 
 from assets.builders import (
     build_opening,
-    build_market_summary,
-    build_sector,
-    build_stock_cards,
     build_shorts_highlight,
-    build_extra_watchlist,
-    build_today_pick,
-    build_brokerage_report,
+    build_recap,
+    build_reaction,
+    build_report_briefing,
     build_ai_strategy,
     build_closing,
 )
@@ -32,10 +29,6 @@ def _kdate_to_dotted(date_str: str) -> str:
         return ""
     y, mo, d = m.groups()
     return f"{y}.{int(mo):02d}.{int(d):02d}"
-
-# summary+chart+mention 개별 카드가 아니라 단일 슬라이드로 렌더링되는 집계형 종목 섹션
-AGGREGATE_STOCK_SECTION_IDS = {"stock_추가관심종목", "stock_오늘의픽", "stock_증권사리포트"}
-
 
 def run(lang: str = "KO"):
     lang = lang.upper()
@@ -65,43 +58,31 @@ def run(lang: str = "KO"):
         set_briefing_date(briefing_date)
         print(f"📅 슬라이드 날짜 고정: {briefing_date}")
 
-    video_format = data.get("video_format", "longform")
+    video_format = data.get("video_format", "shorts")
     asset_map = {"frames": [], "lang": lang}
 
     try:
         asset_map["frames"].append(build_opening(data, out_dir))
 
         if video_format == "shorts":
-            # report_update의 조건부 shorts 분기 — 핵심종목 5개 미만/신규성 낮음일 때
-            # generate_script.py의 generate_shorts_script()가 만든 3섹션(opening/
-            # highlight/closing)짜리 축소 스크립트를 그대로 렌더링한다. market_summary/
-            # sector/종목카드/ai_strategy는 애초에 script.json에 없으므로 건너뛴다.
+            # 핵심종목 5개 미만일 때 — generate_shorts_script()가 만든 3섹션
+            # (opening/highlight/closing)짜리 축소 스크립트를 그대로 렌더링한다.
             frame = build_shorts_highlight(data, out_dir)
             if frame:
                 asset_map["frames"].append(frame)
         else:
-            asset_map["frames"].extend(build_market_summary(data, out_dir))
-            asset_map["frames"].append(build_sector(data, out_dir))
-
-            stock_secs = [
-                s for s in sections
-                if (s.get("id", "").startswith("stock_") or s.get("id", "").startswith("hidden_"))
-                and s.get("id", "") not in AGGREGATE_STOCK_SECTION_IDS
-            ]
-            for i, sec in enumerate(stock_secs):
-                sec_id = sec.get("id", f"stock_{i}")
-                # ── 수정: data 서브키 없음, id에서 직접 종목명 추출 ──────────────
-                name = sec_id.replace("stock_", "").replace("hidden_", "")
-                prefix = f"{10 + i:02d}_{name}"
-                frames = build_stock_cards(sec, out_dir, img_dir, prefix)
-                asset_map["frames"].extend(frames)
-
-            for builder in (build_extra_watchlist, build_today_pick, build_brokerage_report):
+            # mid/full — STEP-1과 각자 완결된 재브리핑이 아니라 "2부"로 설계됐으므로
+            # 시장요약/섹터/종목카드를 처음부터 다시 만들지 않는다. STEP-1 리캡 →
+            # 오전장 반응 업데이트 → 증권사 리포트 브리핑 순으로만 구성한다.
+            for builder in (build_recap, build_reaction, build_report_briefing):
                 frame = builder(data, out_dir)
                 if frame:
                     asset_map["frames"].append(frame)
 
-            asset_map["frames"].append(build_ai_strategy(data, out_dir))
+            # AI전략 업데이트는 full 티어에만 있을 수 있음(mid는 짧게 생략되거나
+            # 1줄로 축약돼 섹션 자체가 없을 수 있음) — 섹션 존재 여부로 판단.
+            if any(s.get("id") == "ai_strategy" for s in sections):
+                asset_map["frames"].append(build_ai_strategy(data, out_dir))
 
         asset_map["frames"].append(build_closing(data, out_dir))
     finally:

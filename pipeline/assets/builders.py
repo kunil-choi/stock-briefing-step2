@@ -328,6 +328,31 @@ def build_shorts_highlight(data, out_dir):
     return _build_aggregate_stock_slide(sec, out_dir, "05_highlight.png", "증권사 리포트 하이라이트")
 
 
+# ── report_update 재설계(mid/full 티어): 리캡/오전장 반응/리포트 브리핑 ──
+# 셋 다 items:[{name,text}] 형태라 _build_aggregate_stock_slide()를 그대로
+# 재사용한다(신규 레이아웃 코드 불필요).
+
+def build_recap(data, out_dir):
+    sec = _find_section(data.get("sections", []), "recap")
+    if not sec:
+        return None
+    return _build_aggregate_stock_slide(sec, out_dir, "02_recap.png", "오늘 아침 브리핑 리캡")
+
+
+def build_reaction(data, out_dir):
+    sec = _find_section(data.get("sections", []), "reaction")
+    if not sec:
+        return None
+    return _build_aggregate_stock_slide(sec, out_dir, "03_reaction.png", "오전장 반응 업데이트")
+
+
+def build_report_briefing(data, out_dir):
+    sec = _find_section(data.get("sections", []), "briefing")
+    if not sec:
+        return None
+    return _build_aggregate_stock_slide(sec, out_dir, "04_briefing.png", "증권사 리포트 브리핑")
+
+
 def build_extra_watchlist(data, out_dir):
     sec = _find_section(data.get("sections", []), "stock_추가관심종목")
     if not sec:

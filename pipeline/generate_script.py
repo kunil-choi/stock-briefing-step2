@@ -1,11 +1,18 @@
 # pipeline/generate_script.py
 """
-AI 주식 브리핑 — 스크립트 생성 모듈 (morning_core / stock-briefing-step1)
-- 데이터 소스: stock-briefing-v3-1의 data/briefing_data.json
-  (raw.githubusercontent.com, Playwright 라이브 사이트 스크래핑 대체 — 이
-  레포는 공개 사이트가 없는 V3_1을 소비하므로 스크래핑 자체가 불가능함)
-- 목표 영상 길이: 정확히 15분 내외
-- 오프닝: 'KBS 머니올라' 멘트
+AI 주식 브리핑 — report_update(STEP-2) 스크립트 생성 모듈
+
+설계 원칙(재설계): STEP-1과 STEP-2는 "각자 완결된 브리핑"이 아니라 "하루짜리
+연속 시리즈의 1부/2부"다. stock-briefing-v3-2가 이미 STEP-1 결과물 위에
+새 정보(오전장 반응/증권사 리포트 심화분석/AI전략 업데이트)만 얹어서
+data/briefing_data.json으로 내려주므로, 이 모듈은 그 내용을 처음부터
+재분석하지 않고 방송 나레이션/자막으로 변환하기만 한다.
+
+- 데이터 소스: stock-briefing-v3-2의 data/briefing_data.json
+  (raw.githubusercontent.com)
+- 목표 영상 길이: length_tier에 비례한 가변 길이
+  (shorts 30~50초 / mid 5~8분 / full 8~15분) — 고정 15분 목표는 폐기.
+- 오프닝: 'KBS 머니올라' 멘트, STEP-1을 다시 설명하지 않고 이어지는 톤
 - 발음 교정 / 나레이션·자막 완전 분리
 - 목소리 관리: pipeline/voice_config.py 에서 통합 관리
 """
@@ -21,10 +28,6 @@ from openai import OpenAI
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-
-from assets.config import (
-    STOCK_CODES, normalize_stock_name, classify_channel_type, resolve_channel_identity,
-)
 
 # SCRIPT_MOCK=1: OpenAI를 실제로 호출하지 않고 구조만 맞는 더미 데이터로
 # 대체한다 — 실제 영상 생성 전에 파이프라인 전체(에셋/오디오/영상/자막/
@@ -44,28 +47,22 @@ TODAY       = datetime.now().strftime("%Y년 %m월 %d일")
 TODAY_MONTH = datetime.now().strftime("%-m")
 TODAY_DAY   = datetime.now().strftime("%-d")
 
-STOCK_NAME_LIST = "\n".join(f"- {name}" for name in STOCK_CODES.keys())
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 오프닝 / 클로징 멘트
 # ─────────────────────────────────────────────────────────────────────────────
 
+# report_update 재설계(1부/2부 연속 시리즈) — 아침 브리핑을 다시 설명하지
+# 않고 "이어서" 들어가는 오프닝으로 교체.
 OPENING_NARRATION = (
-    "오늘 주식시장, 어떤 종목이 가장 뜨거울까요? "
-    "많은 투자자들이 어젯밤 찾아본 그 유튜브 영상 속에 답이 있습니다. "
-    "머니올라가 최근 24시간 내 업로드된 최고 조회수 영상들을 샅샅이 분석해, "
-    "대중의 관심이 쏠린 종목들을 찾아냈습니다. "
-    "여기에 핵심 뉴스, 경제방송, 증권사 리포트까지 종합해 완벽하게 요약해 드립니다. "
-    "오늘 하루 투자의 나침반이 되어줄 머니올라 브리핑, 시작하겠습니다."
+    "오늘 아침 머니올라 브리핑, 잘 보셨나요? "
+    "장이 시작된 지금, 그때 짚어드린 종목들이 실제로 어떻게 움직였는지, "
+    "그리고 그 사이 증권사 리포트에서는 어떤 이야기가 나왔는지 업데이트해 드립니다."
 )
 
 OPENING_SUBTITLE = (
-    "오늘 주식시장, 어떤 종목이 가장 뜨거울까요? "
-    "많은 투자자들이 어젯밤 찾아본 그 유튜브 영상 속에 답이 있습니다. "
-    "머니올라가 최근 24시간 내 업로드된 최고 조회수 영상들을 샅샅이 분석해, "
-    "대중의 관심이 쏠린 종목들을 찾아냈습니다. "
-    "여기에 핵심 뉴스, 경제방송, 증권사 리포트까지 종합해 완벽하게 요약해 드립니다. "
-    "오늘 하루 투자의 나침반이 되어줄 머니올라 브리핑, 시작하겠습니다."
+    "오늘 아침 머니올라 브리핑, 잘 보셨나요? "
+    "장이 시작된 지금, 그때 짚어드린 종목들이 실제로 어떻게 움직였는지, "
+    "그리고 그 사이 증권사 리포트에서는 어떤 이야기가 나왔는지 업데이트해 드립니다."
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -291,204 +288,32 @@ def fetch_briefing_data() -> dict:
     except Exception as e:
         print(f"⚠️ {UPSTREAM_REPO} briefing_data.json 로드 실패: {e}")
         return {}
-
-
-def _kdate_to_iso(date_str: str) -> str:
-    """'2026년 07월 06일' → '2026-07-06'. 매칭 실패 시 빈 문자열."""
-    m = re.match(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", date_str or "")
-    if not m:
-        return ""
-    y, mo, d = m.groups()
-    return f"{y}-{int(mo):02d}-{int(d):02d}"
-
-
-def build_briefing_text(data: dict) -> str:
-    """briefing_data.json을 기존 Playwright 스크래핑 텍스트와 동등한 형태의
-    평문으로 변환한다. _generate_core() 등 기존 LLM 프롬프트 파이프라인은 이
-    텍스트를 그대로 소비하므로 프롬프트 자체는 수정이 필요 없다. 종목별
-    구획 표시(### [종목 구획 시작/끝])는 기존 스크래핑 텍스트의 형식을 그대로
-    유지해, 사명이 비슷한 계열사끼리 내용이 섞이는 걸 막는 기존 안전장치가
-    계속 동작하도록 한다."""
-    lines = []
-    market_summary = data.get("market_summary", "")
-    if market_summary:
-        lines.append(f"## 시장 개요\n{market_summary}")
-
-    hot_sectors = data.get("hot_sectors") or []
-    if hot_sectors:
-        lines.append("## 주목 섹터\n" + "\n".join(
-            f"- {s.get('name', '')}: {s.get('reason', '')}" for s in hot_sectors
-        ))
-
-    ai_strategy = data.get("ai_strategy") or ""
-    if ai_strategy:
-        lines.append(f"## AI 투자 전략\n{ai_strategy}")
-
-    def _stock_block(stock: dict, tag: str) -> str:
-        parts = [
-            f"### [종목 구획 시작] ({tag})",
-            f"종목명: {stock.get('name', '')} ({stock.get('code', '')})",
-            f"신호: {stock.get('signal', '')}",
-            f"요약: {stock.get('summary', '')}",
-            f"촉매: {stock.get('catalyst', '')}",
-            f"리스크: {stock.get('risk', '')}",
-        ]
-        for cm in stock.get("channel_mentions") or []:
-            parts.append(
-                f"[{cm.get('source_type', '')}/{cm.get('source_name', '')}] {cm.get('content', '')}"
+def _call_json(system_prompt: str, user_content: str, max_tokens: int,
+               temperature: float = 0.7, retries: int = 1, mock: dict = None) -> dict:
+    """OpenAI Chat Completions를 호출해 JSON 객체를 반환합니다. 실패 시 1회 재시도.
+    SCRIPT_MOCK=1이고 mock이 주어지면 API를 호출하지 않고 그 값을 그대로 반환한다."""
+    if SCRIPT_MOCK and mock is not None:
+        return mock
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
-        parts.append("### [종목 구획 끝]")
-        return "\n".join(parts)
+            return json.loads(response.choices[0].message.content)
+        except Exception as e:
+            last_err = e
+            print(f"  ⚠️ API 호출 실패(시도 {attempt + 1}/{retries + 1}): {e}")
+    print(f"  ❌ API 호출 최종 실패: {last_err}")
+    return {}
 
-    for s in data.get("market_leaders") or []:
-        lines.append(_stock_block(s, "대형 주도주"))
-    for s in data.get("stocks") or []:
-        lines.append(_stock_block(s, "관심 종목"))
-    for s in data.get("hidden_picks") or []:
-        lines.append(_stock_block(s, "오늘의 픽"))
-
-    return "\n\n".join(lines)
-
-
-def build_synthetic_mentions(data: dict, briefing_date_iso: str) -> list:
-    """market_leaders/stocks/hidden_picks의 channel_mentions을 기존
-    build_stock_quotes()가 기대하는 mentions 리스트 형태로 변환한다
-    (기존에는 youtube_mentions.json에서 이 형태로 직접 가져왔음).
-
-    ★ source_type=="증권사"(증권사가 직접 운영하는 유튜브 채널의 실시간
-    코멘트 — channels.json의 securities 카테고리에서 24h 이내 수집된 것)는
-    애널리스트 PDF 리포트(build_stock_brokerage_mentions()가 별도로 처리하는
-    brokerage_reports)와 전혀 다른 소스인데, 예전에는 "증권사 리포트"로
-    착각해 여기서 통째로 걸러내고 있었다. 이제 원본 source_type을 그대로
-    실어 보내 build_stock_quotes()가 channel_type="증권사"로 분류하도록 한다
-    (stock-briefing-step1에서 동일하게 발견·수정된 버그)."""
-    mentions = []
-    for bucket in ("market_leaders", "stocks", "hidden_picks"):
-        for stock in data.get(bucket) or []:
-            name = (stock.get("name") or "").strip()
-            if not name:
-                continue
-            for cm in stock.get("channel_mentions") or []:
-                mentions.append({
-                    "date":          briefing_date_iso,
-                    "stock_name":    name,
-                    "channel":       cm.get("source_name", ""),
-                    "source_type":   cm.get("source_type", ""),
-                    "speaker":       "",
-                    "quote":         cm.get("content", ""),
-                    "timestamp_url": cm.get("url", ""),
-                    "sentiment":     "",
-                })
-    return mentions
-
-
-def build_stock_market_data(data: dict) -> dict:
-    """market_leaders/stocks/hidden_picks의 실제 price/change_pct/code를
-    종목명 기준으로 모은다. LLM에게 가격을 지어내게 하는 대신(과거 이 값이
-    프롬프트 예시("000,000"/"+0.00%")를 그대로 베껴 화면에 노출되는 사고가
-    있었다) market_summary의 지수 데이터와 동일하게 코드에서 실측치를
-    주입하기 위함이다."""
-    result = {}
-    for bucket in ("market_leaders", "stocks", "hidden_picks"):
-        for stock in data.get(bucket) or []:
-            name = (stock.get("name") or "").strip()
-            if not name:
-                continue
-            price = stock.get("price")
-            change_pct = stock.get("change_pct")
-            result[normalize_stock_name(name)] = {
-                "price":        f"{price:,.0f}" if isinstance(price, (int, float)) else "",
-                "change":       f"{change_pct:+.2f}%" if isinstance(change_pct, (int, float)) else "",
-                "change_positive": bool(change_pct is not None and change_pct >= 0),
-                "price_label":  stock.get("price_label", ""),
-                "code":         stock.get("code", ""),
-            }
-    return result
-
-
-# 원본 소스 데이터의 source_type → 이 방송의 channel_summaries 카테고리(channel_type).
-# "뉴스"(온라인 기사)는 별도 카테고리를 두지 않고 기존 "경제방송"에 합친다
-# (classify_channel_type()도 "매일경제" 같은 언론사명을 이미 경제방송으로 묶고
-# 있어 일관성이 있다). "증권사"는 증권사가 직접 운영하는 유튜브 채널의 실시간
-# 코멘트를 가리키며, channel_type을 채널명 추정(classify_channel_type)에
-# 맡기지 않고 원본 source_type을 그대로 신뢰한다.
-_SOURCE_TYPE_TO_CHANNEL_TYPE = {
-    "증권사":   "증권사",
-    "경제방송": "경제방송",
-    "뉴스":     "경제방송",
-    "유튜브":   "유튜브",
-}
-
-
-def build_stock_quotes(mentions: list, briefing_date_iso: str) -> dict:
-    """
-    종목명을 정규화해 stock_name → [{speaker, channel, channel_type, quote, timestamp_url, sentiment}] 로 그룹핑.
-    briefing_date_iso가 있으면 같은 날짜의 발언만 사용 (V3 브리핑과 날짜 어긋남 방지).
-    mention 슬라이드는 최대 3슬라이드(슬라이드당 3개)까지 지원하므로 종목당 최대 9개 발언까지 유지해
-    출연진의 발언을 최대한 폭넓게 다룬다 (요구사항: 방송/유튜브 전문가 발언 종합이 이 영상의 핵심 목적).
-    """
-    grouped: dict = {}
-    for m in mentions:
-        if briefing_date_iso and m.get("date") and m.get("date") != briefing_date_iso:
-            continue
-        raw_name = (m.get("stock_name") or "").strip()
-        if not raw_name:
-            continue
-        name = normalize_stock_name(raw_name)
-        raw_channel = m.get("channel", "")
-        raw_speaker = m.get("speaker") or m.get("main_speaker", "")
-        channel, speaker = resolve_channel_identity(raw_channel, raw_speaker)
-        channel_type = _SOURCE_TYPE_TO_CHANNEL_TYPE.get((m.get("source_type") or "").strip())
-        if not channel_type:
-            channel_type = classify_channel_type(channel)
-        grouped.setdefault(name, []).append({
-            "speaker":       speaker,
-            "channel":       channel,
-            "channel_type":  channel_type,
-            "quote":         m.get("quote", ""),
-            "timestamp_url": m.get("timestamp_url") or m.get("video_url", ""),
-            "sentiment":     m.get("sentiment", ""),
-        })
-    return {name: items[:9] for name, items in grouped.items()}
-
-
-def build_stock_brokerage_mentions(brokerage_reports: dict) -> dict:
-    """
-    brokerage_reports(simultaneous/new_coverage/single_significant)를 종목명 기준으로
-    재그룹핑합니다: stock_name → [{brokers, title, opinion, target_price, ai_summary}].
-    종목별 mention 종합 요약("증권사" 카테고리)의 근거 데이터로 사용됩니다.
-    """
-    grouped: dict = {}
-    if not brokerage_reports:
-        return grouped
-    for bucket in ("simultaneous", "new_coverage", "single_significant"):
-        for r in brokerage_reports.get(bucket, []) or []:
-            raw_name = (r.get("stock_name") or "").strip()
-            if not raw_name:
-                continue
-            name = normalize_stock_name(raw_name)
-            grouped.setdefault(name, []).append({
-                "brokers":      r.get("brokers", []),
-                "title":        r.get("title", ""),
-                "opinion":      r.get("opinion", ""),
-                "target_price": r.get("target_price", ""),
-                "ai_summary":   r.get("ai_summary", ""),
-            })
-    return grouped
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 스크립트 생성
-#
-# ★ 설계 노트 (다중 호출 아키텍처): gpt-4o의 출력 토큰 상한은 16,384개로 고정돼
-# 있습니다. 15분 분량(시장요약+업종분석+AI전략+대형주도주/상위종목 5개(종목당 최대
-# 9개 발언 인용 포함)+집계 섹션)을 narration+subtitle 이중 표기로 모두 채우려면
-# 실측상 25,000~55,000 토큰이 필요해, 한 번의 API 호출로는 절대 다 채울 수
-# 없습니다. 프롬프트 글자 수 목표를 아무리 올려도 이 하드 리밋 때문에 실제로는
-# 전혀 개선되지 않았던 것이 바로 이 문제입니다.
-# 그래서 하나의 거대한 호출 대신, 섹션별로 여러 번의 작은 호출로 나눠 생성한 뒤
-# 병합합니다. 각 호출은 개별적으로 16,384 토큰 상한에 여유 있게 들어갑니다.
-# ─────────────────────────────────────────────────────────────────────────────
 
 _NARRATION_SUBTITLE_RULES = """
 ## ★ narration vs subtitle 핵심 차이 (반드시 준수)
@@ -532,494 +357,6 @@ _NARRATION_SUBTITLE_RULES = """
   · MOU(업무협약) | ADR(미국주식예탁증서) | PCE(개인소비지출) | ESS(에너지저장장치) | OTT(온라인 동영상 서비스)
 """
 
-_MENTION_RULES = """
-## ★ channel_summaries 항목 규칙 — 이 방송의 핵심 목적
-이 방송은 유튜브·경제방송에 출연한 전문가들과 증권사 리포트가 각 종목에 대해 실제로
-어떻게 평가하고 있는지 "정확하게 분석해 짧게 정리"해 전달하는 것이 목적입니다.
-발언·리포트 원문을 그대로 나열하거나 인용하지 말고, 핵심 논지·수치·전망을 종합적으로
-이해한 뒤 자연스러운 문장으로 다시 써서 정리하세요. 추임새·군더더기·반복되는 잡담은
-모두 제거하고 투자 판단에 실제로 도움이 되는 내용만 남기세요.
-
-### 카테고리 3종 (해당 데이터가 있는 카테고리만 작성)
-- 아래 별도 제공되는 stock_quotes(JSON)는 각 항목에 channel_type이 "유튜브"/
-  "경제방송"/"증권사" 중 하나로 표시돼 있습니다("증권사"는 증권사가 직접 운영하는
-  유튜브 채널에서 최근 24시간 내 나온 실시간 코멘트입니다). channel_type별로
-  묶어서 각각 하나의 종합 요약을 작성하세요(유튜브 종합 1개, 경제방송 종합 1개,
-  stock_quotes 안의 증권사 발언 종합 1개).
-- 별도 제공되는 stock_brokerage(JSON)가 있으면(애널리스트가 작성한 정식 리포트),
-  그 안의 브로커·투자의견·목표주가·ai_summary도 "증권사" 카테고리에 함께 종합하세요
-  — stock_quotes의 증권사 유튜브 발언과 stock_brokerage의 리포트가 둘 다 있으면
-  하나의 "증권사" 요약 안에 함께 녹여내세요.
-- 해당 카테고리에 데이터가 전혀 없으면 그 카테고리는 channel_summaries 배열에서
-  완전히 생략하세요(빈 요약을 지어내지 마세요).
-
-### 분석·요약 원칙 (반드시 준수)
-- 없는 내용을 지어내지 말고, 제공된 데이터에 실제로 나온 의견·수치·근거만 사용하세요.
-- 단순 나열이 아니라 "종합 분석"이어야 합니다: 여러 발언/리포트의 공통된 시각이나
-  차이점을 짚고, 목표주가·투자의견·핵심 촉매·리스크 등 구체적 근거를 포함하세요.
-- 채널명/증권사명은 자연스럽게 문장 안에 녹여 언급하세요(예: "삼프로TV와 한국경제TV
-  양쪽에서 모두...", "미래에셋증권과 키움증권은 목표주가를...").
-- 분량: 카테고리별 narration 250~320자 내외(공백 포함). 짧은 headline이 아니라
-  완결된 분석 문단으로 작성하세요.
-
-### narration (TTS 낭독용)
-- "[채널 종류] 쪽에서는" 또는 "증권사 리포트에서는" 식으로 자연스럽게 시작하세요.
-- 종결어미 다양화 (같은 어미 2회 연속 금지):
-  "~라고 분석했습니다" | "~다고 평가했습니다" | "~라고 진단했습니다" | "~고 내다봤습니다"
-  "~다고 전망했습니다" | "~라고 짚었습니다" | "~고 설명했습니다" | "~다고 판단했습니다"
-
-### subtitle (화면 카드 본문)
-- narration과 문장 수·순서를 동일하게 맞추되, 숫자·영문은 subtitle 표기 규칙(아라비아
-  숫자/로마자 원표기)을 따르세요.
-
-## 출력 JSON의 channel_summaries 배열 형식
-"channel_summaries": [
-  {"channel_type": "유튜브", "sources": ["채널명1", "채널명2"],
-   "narration": "...(250~320자)", "subtitle": "..."},
-  {"channel_type": "경제방송", "sources": [...], "narration": "...", "subtitle": "..."},
-  {"channel_type": "증권사", "sources": ["증권사명1", "증권사명2"], "narration": "...", "subtitle": "..."}
-]
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SCRIPT_MOCK=1 더미 생성기 — 실제 LLM 없이 스키마만 맞춘 응답을 만든다.
-# 각 함수는 실제 호출부가 이미 갖고 있는 입력값만 사용해, 다운스트림 파이프라인
-# (에셋/오디오/영상/자막/quality_gate)을 토큰 소비 없이 검증할 수 있게 한다.
-# ─────────────────────────────────────────────────────────────────────────────
-
-_MOCK_STOCK_BLOCK_RE = re.compile(r"### \[종목 구획 시작\] \((.*?)\)\n종목명: (.*?) \(")
-
-
-def _mock_core_response(briefing_text: str) -> dict:
-    """build_briefing_text()가 남긴 "(대형 주도주)/(관심 종목)/(오늘의 픽)" 태그를
-    그대로 파싱해 실제 종목 분류를 재사용한다(LLM 호출 없이도 실제 종목명으로
-    다운스트림을 검증하기 위함)."""
-    tag_to_bucket = {"대형 주도주": "market_leaders", "관심 종목": "stocks", "오늘의 픽": "hidden_picks"}
-    buckets = {"market_leaders": [], "stocks": [], "hidden_picks": []}
-    for m in _MOCK_STOCK_BLOCK_RE.finditer(briefing_text):
-        bucket = tag_to_bucket.get(m.group(1))
-        name = m.group(2).strip()
-        if bucket and name and name not in buckets[bucket]:
-            buckets[bucket].append(name)
-    return {
-        "keywords": ["[MOCK]키워드1", "[MOCK]키워드2", "[MOCK]키워드3"],
-        "market_summary": {
-            "corner_summary": "[MOCK] 오늘 시장 한줄 요약",
-            "narration": "[MOCK] 오늘의 시장 흐름을 요약한 더미 문장입니다. " * 6,
-            "subtitle": "[MOCK] 오늘의 시장 흐름을 요약한 더미 문장입니다. " * 6,
-            "points": ["[MOCK] 포인트1", "[MOCK] 포인트2", "[MOCK] 포인트3"],
-        },
-        "sectors": {
-            "corner_summary": "[MOCK] 핵심 섹터 한줄 요약",
-            "narration": "[MOCK] 업종 분석 더미 문장입니다. " * 8,
-            "subtitle": "[MOCK] 업종 분석 더미 문장입니다. " * 8,
-            "sector_list": [
-                {"name": "반도체", "desc": "[MOCK] 더미 설명", "momentum": "상승"},
-                {"name": "2차전지", "desc": "[MOCK] 더미 설명", "momentum": "보합"},
-            ],
-        },
-        "ai_strategy": {
-            "corner_summary": "[MOCK] AI 전략 한줄 요약",
-            "narration": "[MOCK] 투자 전략 더미 문장입니다. " * 8,
-            "subtitle": "[MOCK] 투자 전략 더미 문장입니다. " * 8,
-            "bullet_points": ["[MOCK] 전략1", "[MOCK] 전략2", "[MOCK] 전략3"],
-        },
-        "market_leaders":   buckets["market_leaders"][:2],
-        "top_stocks":       buckets["stocks"][:3],
-        "remaining_stocks": buckets["stocks"][3:],
-        "hidden_picks":     buckets["hidden_picks"],
-    }
-
-
-def _mock_stock_section(stock_name: str, quotes: list, brokerage_mentions: list) -> dict:
-    """실제 quotes의 channel_type 분포를 그대로 반영해(유튜브/경제방송/증권사)
-    channel_summaries 개수·오디오 job 수가 실제 실행과 비슷하게 나오도록 한다."""
-    types_present = {q.get("channel_type") for q in (quotes or [])}
-    channel_summaries = []
-    for ctype in ("유튜브", "경제방송", "증권사"):
-        if ctype not in types_present:
-            continue
-        sources = list({q["channel"] for q in quotes if q.get("channel_type") == ctype})[:3] or ["[MOCK]채널"]
-        channel_summaries.append({
-            "channel_type": ctype, "sources": sources,
-            "narration": f"[MOCK] {ctype} 종합: {stock_name} 관련 더미 분석 문장입니다. " * 3,
-            "subtitle":  f"[MOCK] {ctype} 종합: {stock_name} 관련 더미 분석 문장입니다. " * 3,
-        })
-    if brokerage_mentions and "증권사" not in types_present:
-        channel_summaries.append({
-            "channel_type": "증권사", "sources": ["[MOCK]증권사"],
-            "narration": f"[MOCK] 증권사 리포트 종합: {stock_name} 더미 분석입니다.",
-            "subtitle":  f"[MOCK] 증권사 리포트 종합: {stock_name} 더미 분석입니다.",
-        })
-    return {
-        "corner_summary": f"[MOCK] {stock_name} 오늘 상황 요약",
-        "narration_summary": f"다음은 {stock_name} 분석입니다. [MOCK] 더미 분석 문장입니다. " * 4,
-        "subtitle_summary":  f"다음은 {stock_name} 분석입니다. [MOCK] 더미 분석 문장입니다. " * 4,
-        "summary": f"[MOCK] {stock_name} 한 문장 요약",
-        "catalysts": ["[MOCK] 촉매1", "[MOCK] 촉매2"],
-        "risks": ["[MOCK] 리스크1"],
-        "channel_summaries": channel_summaries,
-    }
-
-
-def _mock_aggregate_sections(remaining_stocks: list, hidden_picks: list,
-                              brokerage_reports: dict) -> dict:
-    result = {}
-    if remaining_stocks:
-        result["stock_추가관심종목"] = {
-            "corner_summary": "[MOCK] 추가 관심 종목 한줄 요약",
-            "narration": "다음은 오늘의 추가 관심 종목입니다. " + " ".join(f"[MOCK] {n} 더미 설명." for n in remaining_stocks),
-            "subtitle": "다음은 오늘의 추가 관심 종목입니다. " + " ".join(f"[MOCK] {n} 더미 설명." for n in remaining_stocks),
-            "items": [{"name": n, "text": f"[MOCK] {n}에 대한 더미 설명입니다."} for n in remaining_stocks],
-        }
-    if hidden_picks:
-        result["stock_오늘의픽"] = {
-            "corner_summary": "[MOCK] 오늘의 픽 한줄 요약",
-            "narration": "오늘의 숨은 픽을 소개합니다. " + " ".join(f"[MOCK] {n} 더미 설명." for n in hidden_picks),
-            "subtitle": "오늘의 숨은 픽을 소개합니다. " + " ".join(f"[MOCK] {n} 더미 설명." for n in hidden_picks),
-            "items": [{"name": n, "text": f"[MOCK] {n}에 대한 더미 설명입니다."} for n in hidden_picks],
-        }
-    if brokerage_reports:
-        names = [
-            r.get("stock_name", "")
-            for bucket in ("simultaneous", "new_coverage", "single_significant")
-            for r in (brokerage_reports.get(bucket) or [])
-        ]
-        names = [n for n in names if n]
-        if names:
-            result["stock_증권사리포트"] = {
-                "corner_summary": "[MOCK] 증권사 리포트 한줄 요약",
-                "narration": "증권사 리포트에서 주목한 종목을 살펴보겠습니다. " + " ".join(f"[MOCK] {n} 더미." for n in names),
-                "subtitle": "증권사 리포트에서 주목한 종목을 살펴보겠습니다. " + " ".join(f"[MOCK] {n} 더미." for n in names),
-                "items": [{"name": n, "text": f"[MOCK] {n} 증권사 리포트 더미."} for n in names],
-            }
-    return result
-
-
-def _mock_shorts_response(brokerage_reports: dict) -> dict:
-    names = [
-        r.get("stock_name", "")
-        for bucket in ("simultaneous", "new_coverage", "single_significant")
-        for r in ((brokerage_reports or {}).get(bucket) or [])
-    ]
-    names = [n for n in names if n][:2] or ["[MOCK]종목"]
-    narration = "증권사 리포트에서는 " + ", ".join(names) + "에 대한 더미 하이라이트를 다룹니다."
-    return {"narration": narration, "subtitle": narration}
-
-
-def _call_json(system_prompt: str, user_content: str, max_tokens: int,
-               temperature: float = 0.7, retries: int = 1, mock: dict = None) -> dict:
-    """OpenAI Chat Completions를 호출해 JSON 객체를 반환합니다. 실패 시 1회 재시도.
-    SCRIPT_MOCK=1이고 mock이 주어지면 API를 호출하지 않고 그 값을 그대로 반환한다."""
-    if SCRIPT_MOCK and mock is not None:
-        return mock
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            return json.loads(response.choices[0].message.content)
-        except Exception as e:
-            last_err = e
-            print(f"  ⚠️ API 호출 실패(시도 {attempt + 1}/{retries + 1}): {e}")
-    print(f"  ❌ API 호출 최종 실패: {last_err}")
-    return {}
-
-
-def _generate_core(briefing_text: str, market_data: dict) -> dict:
-    """시장요약/업종분석/AI전략 코너와 종목 분류 목록을 생성하는 1차 호출.
-    종목별 상세 섹션(mentions 포함)은 여기서 만들지 않아 토큰 상한에 여유가 큽니다."""
-    system_prompt = f"""
-너는 KBS 머니올라 주식 방송 스크립트 작성 전문가입니다. 오늘 방송의 '시장 요약',
-'업종 분석', 'AI 투자 전략' 코너와, 이후 종목별 섹션을 만들기 위한 종목 분류 목록을
-JSON으로 작성하세요. 이 호출에서는 개별 종목의 상세 설명은 작성하지 마세요.
-작성일: {TODAY}
-
-{_NARRATION_SUBTITLE_RULES}
-
-## ★ 섹션별 요구사항 (narration 글자 수, 공백 포함)
-- market_summary: 480~600자 (목표 1분 30초~2분, 600자를 크게 넘기지 말 것).
-  KOSPI·KOSDAQ·해외지수·환율의 등락과 핵심 원인 1~2가지만 짚고, 업종·개별 종목 상세
-  설명은 하지 마세요(다음 코너에서 다룸). "먼저 오늘의 주식시장 전체 흐름을 요약해
-  드리겠습니다."로 시작. points는 3~4개.
-- sectors: 900자 이상. sector_list는 최소 4개, 각 섹터마다 narration에서 최소 150자
-  이상 분량으로(주도 종목, 상승/하락 배경, 수급 근거, 전망까지) 충분히 설명하고,
-  market_summary와 중복되는 지수·환율 코멘트는 반복하지 마세요. "오늘 시장에서
-  주목받는 핵심 업종들을 살펴보겠습니다."로 시작. sector_list는 최대 6개.
-- ai_strategy: 700자 이상. bullet_points는 최소 4개, 각 bullet을 narration에서 최소
-  120자 이상 분량으로 구체적 근거·수치와 함께 서술. "에이아이가 제안하는 오늘의
-  투자 전략입니다."로 시작. bullet_points는 최대 6개.
-- 위 세 섹션 모두 목표 글자 수 미달을 절대 허용하지 마세요. 미달 시 배경 설명, 수치,
-  전망을 추가해서 채우세요. "간략히", "요약하면" 같은 축약 표현은 쓰지 마세요.
-
-## ★ 종목 분류 (브리핑 원문에서 추출 — 본문 작성 없이 목록만)
-- market_leaders: 브리핑에서 가장 비중 있게 다뤄진 대형 주도주 정확히 2개.
-- top_stocks: market_leaders를 제외하고 weighted_score(또는 언급 비중)가 높은 상위 3개.
-- remaining_stocks: 브리핑에 등장하는 나머지 관심 종목 전부 (생략 없이 모두 나열).
-- hidden_picks: '오늘의 픽'/'숨은 종목' 성격의 종목 (없으면 빈 배열).
-- 종목명은 아래 목록의 정확한 표기를 사용하세요.
-
-## ★ 종목 목록 매핑
-{STOCK_NAME_LIST}
-
-## 출력 JSON 구조
-{{
-  "keywords": ["키워드1", "키워드2", "키워드3"],
-  "market_summary": {{
-    "corner_summary": "오늘 시장의 핵심 한줄 요약",
-    "narration": "...", "subtitle": "...",
-    "points": ["포인트1", "포인트2", "포인트3"]
-  }},
-  "sectors": {{
-    "corner_summary": "오늘의 핵심 섹터 한줄 요약",
-    "narration": "...", "subtitle": "...",
-    "sector_list": [{{"name": "섹터명", "desc": "설명", "momentum": "상승/보합/하락"}}]
-  }},
-  "ai_strategy": {{
-    "corner_summary": "오늘의 AI 전략 핵심 요약",
-    "narration": "...", "subtitle": "...",
-    "bullet_points": ["전략1", "전략2"]
-  }},
-  "market_leaders": ["종목명", "종목명"],
-  "top_stocks": ["종목명", "종목명", "종목명"],
-  "remaining_stocks": ["종목명"],
-  "hidden_picks": []
-}}
-"""
-    user_content = (
-        (f"## 실시간 시장 지표 (참고만 하고 narration/subtitle 서술에 반영하세요. "
-         f"이 수치 필드를 JSON에 다시 출력할 필요는 없습니다)\n"
-         f"{json.dumps(market_data, ensure_ascii=False, indent=2)}\n\n"
-         if market_data else "")
-        + briefing_text
-    )
-    data = _call_json(system_prompt, user_content, max_tokens=6000, temperature=0.7,
-                       mock=_mock_core_response(briefing_text) if SCRIPT_MOCK else None)
-
-    market_summary = data.get("market_summary") or {}
-    if market_data:
-        market_summary = {**market_summary, **market_data}
-
-    return {
-        "keywords":          (data.get("keywords") or [])[:4],
-        "market_summary":    market_summary,
-        "sectors":           data.get("sectors") or {},
-        "ai_strategy":       data.get("ai_strategy") or {},
-        "market_leaders":    data.get("market_leaders") or [],
-        "top_stocks":        data.get("top_stocks") or [],
-        "remaining_stocks":  data.get("remaining_stocks") or [],
-        "hidden_picks":      data.get("hidden_picks") or [],
-    }
-
-
-def _is_unfilled_stock_section(data: dict, stock_name: str) -> bool:
-    """예시로 보여준 placeholder 문구가 실제 값인 것처럼 그대로 출력에 남았는지
-    검사한다 — 과거 "000,000"/"한줄 요약"이 화면에 그대로 노출된 사고
-    (LLM이 스키마 예시를 실제 값으로 착각해 베낀 것)의 재발 방지용 안전망."""
-    corner = (data.get("corner_summary") or "").strip()
-    summary = (data.get("summary") or "").strip()
-    return (
-        corner in ("", f"{stock_name} 한줄 요약", "한줄 요약")
-        or summary in ("", "한줄 요약")
-    )
-
-
-def _generate_stock_section(stock_name: str, briefing_text: str,
-                             quotes: list, is_hidden: bool = False,
-                             brokerage_mentions: list = None,
-                             market_data: dict = None) -> dict:
-    """종목 하나에 대한 완전한 섹션(summary+channel_summaries)을 생성하는 호출.
-    market_leaders/top_stocks 종목마다 별도로 호출해, 근거 데이터가 많아도 토큰
-    상한에 안전하게 들어갑니다."""
-    brokerage_mentions = brokerage_mentions or []
-    market_data = market_data or {}
-    system_prompt = f"""
-너는 KBS 머니올라 주식 방송 스크립트 작성 전문가입니다. 아래 종목 '{stock_name}' 하나에
-대한 종목 분석 섹션만 작성하세요. 다른 종목은 절대 다루지 마세요.
-작성일: {TODAY}
-
-{_NARRATION_SUBTITLE_RULES}
-
-{_MENTION_RULES}
-
-## ★ 분량 요구사항 (요구사항: 종목별 설명을 더 자세히)
-- narration_summary 400자 이상.
-- channel_summaries의 각 항목 narration은 250~320자 내외.
-- 목표 미달을 절대 허용하지 마세요. "간략히", "요약하면" 표현 금지.
-
-## ★ 코너 멘트
-- narration_summary 시작: "다음은 {stock_name} 분석입니다."
-
-## ★ 반드시 실제 값으로 채울 것 (아래 출력 JSON 구조의 값은 형식 예시일 뿐,
-그대로 복사해서 출력하면 안 됩니다 — corner_summary/summary는 매번 이 종목의
-실제 상황을 반영한 새 문장이어야 합니다)
-- corner_summary: 이 종목의 오늘 상황을 25자 내외 한 문장으로 직접 요약.
-- summary: 이 종목 분석의 핵심을 한 문장으로 직접 요약.
-- 가격/등락률은 이 호출에서 다루지 않습니다(별도 실제 시세 데이터로 채워집니다) —
-  price/change 필드는 출력하지 마세요.
-
-## 출력 JSON 구조
-{{
-  "corner_summary": "(예: 반도체 수출 호조로 외국인 매수 집중)",
-  "narration_summary": "...", "subtitle_summary": "...",
-  "summary": "(예: 반도체 수출 호조와 외국인 매수세로 긍정적 전망)",
-  "catalysts": ["촉매1", "촉매2"], "risks": ["리스크1"],
-  "channel_summaries": [
-    {{"channel_type": "유튜브", "sources": ["채널명1", "채널명2"],
-      "narration": "...(250~320자)", "subtitle": "..."}},
-    {{"channel_type": "경제방송", "sources": [...], "narration": "...", "subtitle": "..."}},
-    {{"channel_type": "증권사", "sources": ["증권사명1"], "narration": "...", "subtitle": "..."}}
-  ]
-}}
-
-stock_quotes/stock_brokerage 둘 다 비어 있으면 channel_summaries는 빈 배열로 두세요.
-"""
-    user_content = (
-        (f"## 이 종목의 유튜브·경제방송·증권사 발언 원본 (channel_type별로 묶어 종합 분석)\n"
-         f"{json.dumps(quotes, ensure_ascii=False, indent=2)}\n\n"
-         if quotes else "이 종목에 대한 유튜브·경제방송·증권사 발언 데이터가 없습니다.\n\n")
-        + (f"## 이 종목의 증권사 리포트 원본 (종합해 '증권사' 카테고리로 분석)\n"
-           f"{json.dumps(brokerage_mentions, ensure_ascii=False, indent=2)}\n\n"
-           if brokerage_mentions else "이 종목에 대한 증권사 리포트 데이터가 없습니다.\n\n")
-        + f"## 브리핑 원문 (이 중 '{stock_name}' 관련 내용만 참고하세요)\n{briefing_text}"
-    )
-    data = _call_json(system_prompt, user_content, max_tokens=6000, temperature=0.7,
-                       mock=_mock_stock_section(stock_name, quotes, brokerage_mentions) if SCRIPT_MOCK else None)
-    if data and _is_unfilled_stock_section(data, stock_name):
-        print(f"  ⚠️ {stock_name}: corner_summary/summary가 예시 placeholder 그대로 반환됨 — 재시도")
-        data = _call_json(system_prompt, user_content, max_tokens=6000, temperature=0.9)
-        if data and _is_unfilled_stock_section(data, stock_name):
-            print(f"  ❌ {stock_name}: 재시도 후에도 placeholder — 화면에 빈 요약이 노출될 수 있음")
-    if not data:
-        return {}
-    data["id"] = f"{'hidden_' if is_hidden else 'stock_'}{stock_name}"
-    data["label"] = f"{'숨은 ' if is_hidden else ''}종목 분석 - {stock_name}"
-    # 가격/등락률은 LLM이 지어내지 않고 V3_2 원본 시세로 항상 덮어쓴다
-    # (market_summary의 지수 데이터를 코드에서 주입하는 것과 동일한 패턴).
-    data["price"] = market_data.get("price", "")
-    data["change"] = market_data.get("change", "")
-    data["change_positive"] = market_data.get("change_positive", True)
-    return data
-
-
-def _generate_aggregate_sections(remaining_stocks: list, hidden_picks: list,
-                                  brokerage_reports: dict, briefing_text: str) -> list:
-    """추가 관심 종목 / 오늘의 픽 / 증권사 리포트 3개 집계 섹션을 생성하는 호출."""
-    if not remaining_stocks and not hidden_picks and not brokerage_reports:
-        return []
-
-    system_prompt = f"""
-너는 KBS 머니올라 주식 방송 스크립트 작성 전문가입니다. 아래 세 집계형 코너를 JSON으로
-작성하세요. 해당 데이터가 없는 코너는 결과 JSON에서 필드 자체를 생략하세요.
-작성일: {TODAY}
-
-{_NARRATION_SUBTITLE_RULES}
-
-## ★ 종목 혼동 금지 (매우 중요)
-- 브리핑 원문에는 사명이 비슷한 계열사(예: 삼성SDI ↔ 삼성전기, 포스코홀딩스 ↔
-  포스코퓨처엠 등)가 함께 언급될 수 있습니다. items의 각 "text"는 반드시 해당
-  "name"으로 명시된 종목에 대한 내용만 담아야 하며, 원문에서 그 종목명이 실제로
-  등장한 문장·문단만 근거로 사용하세요.
-- 다른 종목(사명이 비슷하거나 같은 섹터라도)의 실적, 수요, 제품(예: MLCC, 배터리 등)
-  관련 내용을 해당 종목의 설명에 섞어 쓰지 마세요. 확실하지 않으면 그 내용은 생략하세요.
-
-## ★ stock_추가관심종목 (remaining_stocks 목록에 있는 종목이 있을 때만 작성)
-- narration/subtitle: "다음은 오늘의 추가 관심 종목입니다."로 시작, 종목 수에 비례해
-  종목당 최소 100자, 전체 400자 이상. 각 종목: 등락 방향+핵심 이유+전망까지 2문장 이상.
-- items: remaining_stocks의 종목을 전부(생략 없이) 다루고, 종목 1개당 items 배열 원소
-  1개. [{{"name": "종목명", "text": "이 종목 1개에 대한 2~3문장 설명"}}, ...]
-  items 순서·개수는 narration에서 언급한 순서·개수와 반드시 일치해야 합니다.
-
-## ★ stock_오늘의픽 (hidden_picks가 있을 때만 작성)
-- narration/subtitle: "오늘의 숨은 픽을 소개합니다."로 시작, hidden_picks 각각을
-  2~3문장으로 소개, 전체 300자 이상.
-- items: hidden_picks 종목 1개당 원소 1개, 위와 동일한 형식.
-
-## ★ stock_증권사리포트 (brokerage_reports 데이터가 있을 때만 작성)
-- narration/subtitle: "증권사 리포트에서 주목한 종목을 살펴보겠습니다."로 시작, 전체
-  300자 이상.
-  · simultaneous(동시언급): "여러 증권사에서 동시에 주목한 [종목명]입니다."로 소개
-  · new_coverage(신규 커버리지 개시): "[증권사]가 [종목명]에 대한 커버리지를 새로
-    시작했습니다."로 소개
-  · single_significant(유의미한 단독 언급): "[증권사]는 [종목명]에 대해 [의견/목표주가
-    요지]를 제시했습니다."로 소개
-- items: 위 세 카테고리에 등장한 종목 1개당 원소 1개, 위와 동일한 형식.
-
-## 문장마다 번호를 매기지 말고, 반드시 종목(items 원소)마다 번호가 매겨지도록 items를
-작성하세요 (화면에 items 배열 순서대로 번호가 표시됩니다).
-
-## 출력 JSON 구조 (해당 데이터 없는 코너는 키 자체를 생략)
-{{
-  "stock_추가관심종목": {{
-    "corner_summary": "추가 관심 종목 한줄 요약",
-    "narration": "...", "subtitle": "...",
-    "items": [{{"name": "종목명", "text": "..."}}]
-  }},
-  "stock_오늘의픽": {{
-    "corner_summary": "오늘의 픽 한줄 요약",
-    "narration": "...", "subtitle": "...",
-    "items": [{{"name": "종목명", "text": "..."}}]
-  }},
-  "stock_증권사리포트": {{
-    "corner_summary": "증권사 리포트 한줄 요약",
-    "narration": "...", "subtitle": "...",
-    "items": [{{"name": "종목명", "text": "..."}}]
-  }}
-}}
-"""
-    user_content = (
-        f"## 추가 관심 종목 목록\n{json.dumps(remaining_stocks, ensure_ascii=False)}\n\n"
-        f"## 오늘의 픽 목록\n{json.dumps(hidden_picks, ensure_ascii=False)}\n\n"
-        + (f"## 증권사 리포트 데이터\n{json.dumps(brokerage_reports, ensure_ascii=False, indent=2)}\n\n"
-           if brokerage_reports else "")
-        + f"## 브리핑 원문\n{briefing_text}"
-    )
-    data = _call_json(system_prompt, user_content, max_tokens=8000, temperature=0.7,
-                       mock=_mock_aggregate_sections(remaining_stocks, hidden_picks, brokerage_reports)
-                       if SCRIPT_MOCK else None)
-
-    sections = []
-    for sid, title in (
-        ("stock_추가관심종목", "추가 관심 종목"),
-        ("stock_오늘의픽", "오늘의 픽"),
-        ("stock_증권사리포트", "증권사 리포트"),
-    ):
-        sec = data.get(sid)
-        if sec:
-            sec["id"] = sid
-            sec["label"] = title
-            sections.append(sec)
-    return sections
-
-
-def _warn_cross_stock_contamination(aggregate_sections: list) -> None:
-    """items[].text에 다른 화이트리스트 종목명이 섞여 있는지 가벼운 검사만 수행하고
-    경고만 출력합니다(생성 파이프라인을 막지 않음). 종목명이 비슷한 계열사끼리 내용이
-    혼입되는 사고(예: 삼성SDI 설명에 삼성전기 언급)를 조기에 발견하기 위한 안전망입니다."""
-    all_names = list(STOCK_CODES.keys())
-    for sec in aggregate_sections:
-        for item in sec.get("items", []):
-            name = item.get("name", "")
-            text = item.get("text", "")
-            if not name or not text:
-                continue
-            own = normalize_stock_name(name)
-            for other in all_names:
-                if other == own or other in own or own in other:
-                    continue
-                if other in text:
-                    print(f"  ⚠️  종목 혼동 의심: '{name}' 설명에 다른 종목명 '{other}'가 "
-                          f"포함되어 있습니다 — {sec.get('id', '')} 섹션을 확인하세요.")
-
 
 SHORTS_OPENING_NARRATION = "오늘 증권사 리포트에서 주목한 핵심 종목, 빠르게 정리해 드립니다."
 SHORTS_OPENING_SUBTITLE  = "오늘 증권사 리포트에서 주목한 핵심 종목, 빠르게 정리해 드립니다."
@@ -1027,17 +364,205 @@ SHORTS_CLOSING_NARRATION = "자세한 내용은 정규 브리핑에서 확인하
 SHORTS_CLOSING_SUBTITLE  = "자세한 내용은 정규 브리핑에서 확인하세요. 투자의 책임은 본인에게 있습니다."
 
 
-def generate_shorts_script(briefing_text: str, brokerage_reports: dict) -> dict:
-    """report_decision.decide_video_format()이 "shorts"를 반환했을 때 사용하는
-    축소 스크립트 생성기. 30~60초 분량, 오프닝+하이라이트+클로징 3섹션만
-    만든다 — 기존 generate_script()의 다중 호출 파이프라인(시장요약/업종분석/
-    종목별 상세/집계 섹션)을 그대로 재사용하지 않고 단일 LLM 호출로 끝낸다."""
-    system_prompt = f"""
+# ── mid/full: 업데이트 스크립트 ──────────────────────────────────────────
+
+def _mock_update_response(v3_2_data: dict) -> dict:
+    recap    = v3_2_data.get("step1_recap", {}) or {}
+    leaders  = recap.get("market_leaders", [])
+    reaction = v3_2_data.get("morning_reaction", []) or []
+    stocks   = ((v3_2_data.get("analyst_briefing") or {}).get("stocks", []))
+    return {
+        "recap": {
+            "narration": f"[MOCK] 오늘 아침 {', '.join(leaders) or '주요 종목'}을 짚어드렸는데요. " * 2,
+            "subtitle":  f"[MOCK] 오늘 아침 {', '.join(leaders) or '주요 종목'}을 짚어드렸는데요. " * 2,
+        },
+        "reaction": {
+            "narration": ("[MOCK] 오전장 반응 더미 문장입니다. " * 3) if reaction else "",
+            "subtitle":  ("[MOCK] 오전장 반응 더미 문장입니다. " * 3) if reaction else "",
+        },
+        "briefing_narration": "[MOCK] 증권사 리포트 더미 브리핑입니다. " * max(len(stocks), 1) * 2,
+        "briefing_subtitle":  "[MOCK] 증권사 리포트 더미 브리핑입니다. " * max(len(stocks), 1) * 2,
+        "strategy_narration": "[MOCK] 전략 업데이트 더미 문장입니다. " * 3,
+        "strategy_subtitle":  "[MOCK] 전략 업데이트 더미 문장입니다. " * 3,
+    }
+
+
+_UPDATE_SYSTEM_PROMPT = """
+너는 KBS 머니올라 "장중 업데이트" 방송 대본 작성 전문가입니다. 이 영상은
+오늘 아침에 이미 나간 브리핑의 "2부"입니다 — 시장 요약이나 종목 선정 이유를
+처음부터 다시 설명하지 말고, 아래 제공된 이미 분석된 내용(리캡 재료/오전장
+반응/리포트 분석/전략 업데이트)을 방송 나레이션으로 자연스럽게 바꾸는 것이
+당신의 역할입니다. 새로운 분석이나 숫자를 지어내지 마세요.
+
+{rules}
+
+## 섹션별 지침
+1. recap: 30~40초 분량(narration 100~150자). "오늘 아침 브리핑에서 [종목명]을
+   짚어드렸는데요" 식으로 맥락만 짚고, 내용을 다시 설명하지 마세요.
+2. reaction: 오전장 반응 데이터가 있으면 2~3분 분량(narration 300~450자)으로
+   "그때 이후 실제로 어떻게 움직였는지"를 서술하세요. 데이터가 없으면 빈
+   문자열로 두세요.
+3. briefing: 증권사 리포트 심화분석/섹터테마를 나레이션으로 재구성하세요.
+   섹터 테마가 있으면 먼저 테마로 도입한 뒤 종목별로 이어가세요. 제공된
+   analysis 내용 외의 사실을 새로 지어내지 마세요.
+4. strategy: 아침 전략을 처음부터 다시 쓰지 말고 "무엇이 보강됐는지"
+   중심으로 3~5문장으로 작성하세요.
+
+## 출력 JSON 구조
+{{
+  "recap": {{"narration": "...", "subtitle": "..."}},
+  "reaction": {{"narration": "...", "subtitle": "..."}},
+  "briefing_narration": "...", "briefing_subtitle": "...",
+  "strategy_narration": "...", "strategy_subtitle": "..."
+}}
+""".format(rules=_NARRATION_SUBTITLE_RULES)
+
+
+def generate_update_script(v3_2_data: dict, length_tier: str) -> dict:
+    """mid/full 티어 스크립트 생성 — STEP-1 위에 얹은 새 정보를 나레이션으로
+    변환하는 단일 호출. V3_2가 이미 분석을 끝내놨으므로(리캡/반응/리포트
+    심화분석/전략업데이트), 옛 generate_script()처럼 여러 번 나눠 호출하며
+    처음부터 분석할 필요가 없다."""
+    recap        = v3_2_data.get("step1_recap", {}) or {}
+    reaction     = v3_2_data.get("morning_reaction", []) or []
+    briefing     = v3_2_data.get("analyst_briefing", {}) or {}
+    strategy_upd = v3_2_data.get("ai_strategy_update", "") or ""
+
+    user_content = (
+        f"## 길이 티어: {length_tier} (mid=5~8분, full=8~15분)\n\n"
+        f"## STEP-1 리캡 재료\n{json.dumps(recap, ensure_ascii=False, indent=2)}\n\n"
+        f"## 오전장 반응 데이터\n{json.dumps(reaction, ensure_ascii=False, indent=2)}\n\n"
+        f"## 증권사 리포트 분석\n{json.dumps(briefing, ensure_ascii=False, indent=2)}\n\n"
+        f"## AI전략 업데이트 원문\n{strategy_upd}\n"
+    )
+
+    data = _call_json(
+        _UPDATE_SYSTEM_PROMPT, user_content, max_tokens=6000,
+        mock=_mock_update_response(v3_2_data) if SCRIPT_MOCK else None,
+    ) or {}
+
+    sections = [{
+        "id": "opening", "label": "오프닝",
+        "narration": OPENING_NARRATION, "subtitle": OPENING_SUBTITLE,
+        "keywords": recap.get("market_leaders", [])[:4],
+    }]
+
+    recap_data = data.get("recap", {}) or {}
+    if recap_data.get("narration"):
+        items = []
+        for label, names in (
+            ("대형주도주", recap.get("market_leaders", [])),
+            ("관심종목",   recap.get("stocks", [])),
+            ("오늘의 픽",  recap.get("hidden_picks", [])),
+        ):
+            if names:
+                items.append({"name": label, "text": ", ".join(names)})
+        sections.append({
+            "id": "recap", "label": "리캡",
+            "corner_summary": "오늘 아침 브리핑 리캡",
+            "narration": recap_data.get("narration", ""),
+            "subtitle":  recap_data.get("subtitle", recap_data.get("narration", "")),
+            "items": items,
+        })
+
+    reaction_data = data.get("reaction", {}) or {}
+    if reaction and reaction_data.get("narration"):
+        items = [
+            {
+                "name": r.get("name", ""),
+                "text": (
+                    f"{r.get('step1_price', 0):,}원({r.get('step1_change_pct', 0):+.2f}%) → "
+                    f"{r.get('morning_price', 0):,}원({r.get('morning_change_pct', 0):+.2f}%)"
+                ),
+            }
+            for r in reaction
+        ]
+        sections.append({
+            "id": "reaction", "label": "오전장 반응",
+            "corner_summary": "오전장 반응 업데이트",
+            "narration": reaction_data.get("narration", ""),
+            "subtitle":  reaction_data.get("subtitle", reaction_data.get("narration", "")),
+            "items": items,
+        })
+
+    briefing_narration = data.get("briefing_narration", "")
+    if briefing_narration:
+        items = []
+        for t in briefing.get("sector_themes", []) or []:
+            items.append({"name": f"🎯 {t.get('sector', '')}", "text": t.get("narrative", "")})
+        for s in briefing.get("stocks", []) or []:
+            brokers = s.get("brokers", [])
+            brokers_str = ", ".join(brokers) if isinstance(brokers, list) else str(brokers)
+            items.append({"name": s.get("name", ""), "text": f"({brokers_str}) {s.get('analysis', '')}"})
+        sections.append({
+            "id": "briefing", "label": "증권사 리포트 브리핑",
+            "corner_summary": "오늘의 증권사 리포트",
+            "narration": briefing_narration,
+            "subtitle":  data.get("briefing_subtitle", briefing_narration),
+            "items": items,
+        })
+
+    strategy_narration = data.get("strategy_narration", "")
+    strategy_subtitle  = data.get("strategy_subtitle", strategy_narration)
+    if strategy_narration:
+        if length_tier == "full":
+            sections.append({
+                "id": "ai_strategy", "label": "AI전략 업데이트",
+                "corner_summary": "오늘 아침 전략, 이렇게 업데이트합니다",
+                "narration": strategy_narration,
+                "subtitle":  strategy_subtitle,
+                "bullet_points": [strategy_narration],
+            })
+        else:
+            # mid 티어는 전략 업데이트를 한 문장으로 축약해 짧게 유지한다
+            # ("길이 전략" 설계 결정 — mid는 리캡+반응+리포트가 핵심, 전략은 요약만).
+            first_sentence = strategy_narration.split(". ")[0].strip()
+            if first_sentence and not first_sentence.endswith("."):
+                first_sentence += "."
+            first_subtitle_sentence = strategy_subtitle.split(". ")[0].strip()
+            if first_subtitle_sentence and not first_subtitle_sentence.endswith("."):
+                first_subtitle_sentence += "."
+            sections.append({
+                "id": "ai_strategy", "label": "AI전략 업데이트",
+                "corner_summary": "전략 업데이트 한 줄",
+                "narration": first_sentence,
+                "subtitle":  first_subtitle_sentence or first_sentence,
+                "bullet_points": [first_sentence],
+            })
+
+    sections.append({
+        "id": "closing", "label": "클로징",
+        "narration": CLOSING_NARRATION, "subtitle": CLOSING_SUBTITLE,
+        "disclaimer": DISCLAIMER,
+    })
+
+    result = {
+        "title": f"{TODAY} 장중 업데이트",
+        "date": TODAY,
+        "video_format": length_tier,
+        "sections": sections,
+    }
+    result = fix_subtitle_fields(result)
+
+    total_chars = sum(len(s.get("narration", "") or "") for s in sections)
+    print(f"\n📏 장중 업데이트 나레이션 글자 수 합계: {total_chars:,}자 (티어: {length_tier})")
+    return result
+
+
+# ── shorts: 리포트 하이라이트만 ──────────────────────────────────────────
+
+def _mock_shorts_v2(briefing: dict) -> dict:
+    names = [s.get("name", "") for s in (briefing.get("stocks") or [])][:2] or ["[MOCK]종목"]
+    narration = "증권사 리포트에서는 " + ", ".join(names) + "에 대한 더미 하이라이트를 다룹니다."
+    return {"narration": narration, "subtitle": narration}
+
+
+_SHORTS_SYSTEM_PROMPT = """
 너는 KBS 머니올라 주식 쇼츠 스크립트 작성 전문가입니다. 30~50초 분량의 짧은
 쇼츠 영상에 들어갈 "오늘 증권사 리포트 하이라이트" 문단 하나만 작성하세요.
-작성일: {TODAY}
+작성일: {today}
 
-{_NARRATION_SUBTITLE_RULES}
+{rules}
 
 ## ★ 분량 요구사항
 - narration 150~220자 내외(공백 포함). "증권사 리포트에서는"으로 자연스럽게
@@ -1048,170 +573,39 @@ def generate_shorts_script(briefing_text: str, brokerage_reports: dict) -> dict:
 ## 출력 JSON 구조
 {{"narration": "...", "subtitle": "..."}}
 """
-    user_content = (
-        (f"## 오늘 증권사 리포트 데이터\n{json.dumps(brokerage_reports, ensure_ascii=False, indent=2)}\n\n"
-         if brokerage_reports else "")
-        + f"## 브리핑 원문\n{briefing_text}"
-    )
-    data = _call_json(system_prompt, user_content, max_tokens=1500, temperature=0.7,
-                       mock=_mock_shorts_response(brokerage_reports) if SCRIPT_MOCK else None) or {}
+
+
+def generate_shorts_script(v3_2_data: dict) -> dict:
+    """길이티어 "shorts"용 — 리포트 핵심종목이 적을 때(5개 미만) 30~50초
+    하이라이트 하나만 만든다."""
+    briefing = v3_2_data.get("analyst_briefing", {}) or {}
+
+    system_prompt = _SHORTS_SYSTEM_PROMPT.format(today=TODAY, rules=_NARRATION_SUBTITLE_RULES)
+    user_content = f"## 오늘 증권사 리포트 심화분석\n{json.dumps(briefing, ensure_ascii=False, indent=2)}"
+
+    data = _call_json(
+        system_prompt, user_content, max_tokens=1500,
+        mock=_mock_shorts_v2(briefing) if SCRIPT_MOCK else None,
+    ) or {}
     highlight_narration = data.get("narration", "").strip()
-    highlight_subtitle   = data.get("subtitle", highlight_narration).strip()
+    highlight_subtitle  = data.get("subtitle", highlight_narration).strip()
 
     sections = [
-        {
-            "id": "opening", "label": "오프닝",
-            "narration": SHORTS_OPENING_NARRATION, "subtitle": SHORTS_OPENING_SUBTITLE,
-            "keywords": [],
-        },
-        {
-            "id": "highlight", "label": "증권사 리포트 하이라이트",
-            "corner_summary": "오늘의 증권사 리포트 하이라이트",
-            "narration": highlight_narration, "subtitle": highlight_subtitle,
-        },
-        {
-            "id": "closing", "label": "클로징",
-            "narration": SHORTS_CLOSING_NARRATION, "subtitle": SHORTS_CLOSING_SUBTITLE,
-            "disclaimer": DISCLAIMER,
-        },
+        {"id": "opening", "label": "오프닝",
+         "narration": SHORTS_OPENING_NARRATION, "subtitle": SHORTS_OPENING_SUBTITLE, "keywords": []},
+        {"id": "highlight", "label": "증권사 리포트 하이라이트",
+         "corner_summary": "오늘의 증권사 리포트 하이라이트",
+         "narration": highlight_narration, "subtitle": highlight_subtitle},
+        {"id": "closing", "label": "클로징",
+         "narration": SHORTS_CLOSING_NARRATION, "subtitle": SHORTS_CLOSING_SUBTITLE,
+         "disclaimer": DISCLAIMER},
     ]
-    result = {
-        "title": f"{TODAY} 증권사 리포트 속보",
-        "date": TODAY,
-        "video_format": "shorts",
-        "sections": sections,
-    }
+    result = {"title": f"{TODAY} 증권사 리포트 속보", "date": TODAY, "video_format": "shorts", "sections": sections}
     result = fix_subtitle_fields(result)
 
     total_chars = len(highlight_narration)
     print(f"\n📏 shorts 하이라이트 글자 수: {total_chars:,}자 (목표: 150~220자, 약 30~50초)")
     return result
-
-
-def generate_script(
-    briefing_text: str,
-    market_data: dict = None,
-    brokerage_reports: dict = None,
-    stock_quotes: dict = None,
-    stock_market_data: dict = None,
-) -> dict:
-    stock_quotes = stock_quotes or {}
-    stock_market_data = stock_market_data or {}
-    stock_brokerage = build_stock_brokerage_mentions(brokerage_reports)
-
-    print("\n🧩 1/3 — 시장요약/업종분석/AI전략 + 종목 분류 생성 중...")
-    core = _generate_core(briefing_text, market_data)
-    print(f"   대형 주도주: {core['market_leaders']}")
-    print(f"   상위 관심종목: {core['top_stocks']}")
-    print(f"   추가 관심종목: {len(core['remaining_stocks'])}개 / 오늘의 픽: {len(core['hidden_picks'])}개")
-
-    # 개별 섹션으로 다룰 종목 목록 (대형 주도주 + 상위 관심종목, 중복 제거)
-    seen = set()
-    major_stocks = []
-    for name in core["market_leaders"] + core["top_stocks"]:
-        norm = normalize_stock_name(name)
-        if norm and norm not in seen:
-            seen.add(norm)
-            major_stocks.append(norm)
-
-    print(f"\n🧩 2/3 — 종목별 상세 섹션 생성 중... ({len(major_stocks)}개)")
-    stock_sections = []
-    for i, stock_name in enumerate(major_stocks, 1):
-        print(f"   [{i}/{len(major_stocks)}] {stock_name}")
-        sec = _generate_stock_section(stock_name, briefing_text, stock_quotes.get(stock_name, []),
-                                       brokerage_mentions=stock_brokerage.get(stock_name, []),
-                                       market_data=stock_market_data.get(stock_name, {}))
-        if sec:
-            stock_sections.append(sec)
-        else:
-            print(f"   ⚠️ {stock_name} 섹션 생성 실패 — 건너뜁니다")
-
-    # 개별 섹션에서 다룬 종목은 추가 관심 종목 목록에서 제외
-    covered = set(major_stocks)
-    remaining_stocks = [
-        normalize_stock_name(n) for n in core["remaining_stocks"]
-        if normalize_stock_name(n) not in covered
-    ]
-
-    print(f"\n🧩 3/3 — 집계 섹션(추가 관심종목/오늘의픽/증권사리포트) 생성 중...")
-    aggregate_sections = _generate_aggregate_sections(
-        remaining_stocks, core["hidden_picks"], brokerage_reports, briefing_text
-    )
-    _warn_cross_stock_contamination(aggregate_sections)
-
-    opening_section = {
-        "id": "opening", "label": "오프닝",
-        "narration": "__OPENING__", "subtitle": "__OPENING_SUBTITLE__",
-        "keywords": core["keywords"],
-    }
-    market_summary_section = {"id": "market_summary", "label": "시장 요약", **core["market_summary"]}
-    sectors_section = {"id": "sectors", "label": "업종 분석", **core["sectors"]}
-    ai_strategy_section = {"id": "ai_strategy", "label": "AI 투자 전략", **core["ai_strategy"]}
-    closing_section = {
-        "id": "closing", "label": "클로징",
-        "narration": "__CLOSING__", "subtitle": "__CLOSING_SUBTITLE__",
-        "disclaimer": DISCLAIMER,
-    }
-
-    sections = (
-        [opening_section, market_summary_section, sectors_section]
-        + stock_sections
-        + aggregate_sections
-        + [ai_strategy_section, closing_section]
-    )
-    data = {
-        "title": f"{TODAY} KBS 머니올라 주식 브리핑", "date": TODAY,
-        "video_format": "longform", "sections": sections,
-    }
-
-    def _replace(obj):
-        if isinstance(obj, str):
-            return (obj
-                    .replace("__OPENING__",          OPENING_NARRATION)
-                    .replace("__OPENING_SUBTITLE__",  OPENING_SUBTITLE)
-                    .replace("__CLOSING__",           CLOSING_NARRATION)
-                    .replace("__CLOSING_SUBTITLE__",  CLOSING_SUBTITLE))
-        if isinstance(obj, dict):
-            return {k: _replace(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_replace(v) for v in obj]
-        return obj
-
-    data = _replace(data)
-    data = fix_subtitle_fields(data)
-
-    # ── 분량 검증 로그 ──────────────────────────────────────────────────────
-    sections = data.get("sections", [])
-    total_chars = 0
-    print("\n📏 섹션별 narration 글자 수:")
-    for sec in sections:
-        sid = sec.get("id", "")
-        # narration 필드가 여러 이름으로 존재할 수 있음 (종목 섹션은 summary +
-        # channel_summaries 각 항목의 narration을 전부 합산)
-        if sec.get("narration"):
-            narr = sec["narration"]
-        else:
-            cs_texts = "".join(cs.get("narration", "") for cs in sec.get("channel_summaries", []))
-            narr = sec.get("narration_summary", "") + cs_texts
-        chars = len(narr) if narr else 0
-        total_chars += chars
-        print(f"  {sid}: {chars:,}자")
-    print(f"  ─────────────────")
-    print(f"  합계: {total_chars:,}자  (목표: 5,800자 이상, 약 320자/분 기준 15분 분량)")
-    if total_chars < 5800:
-        print(f"  ⚠️  분량 부족! {5800 - total_chars:,}자 미달 — 영상 후반부가 무음 패딩으로 "
-              f"채워질 위험이 있습니다")
-    else:
-        print(f"  ✅ 분량 목표 달성")
-
-    market_sec = next((s for s in sections if s.get("id") == "market_summary"), None)
-    if market_sec:
-        ms_chars = len(market_sec.get("narration", "") or "")
-        if ms_chars > 600:
-            print(f"  ⚠️  market_summary가 목표(480~600자)를 초과했습니다: {ms_chars:,}자 "
-                  f"(약 {ms_chars / 320 * 60:.0f}초 분량 — 2분 목표 초과)")
-
-    return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1220,90 +614,25 @@ def run(lang: str = "KO"):
     global TODAY
     lang = lang.upper()
 
-    briefing_data = fetch_briefing_data()
-    if not briefing_data:
+    v3_2_data = fetch_briefing_data()
+    if not v3_2_data:
         print(f"❌ {UPSTREAM_REPO}의 briefing_data.json을 가져오지 못했습니다. 종료합니다.")
         sys.exit(1)
 
-    briefing_text = build_briefing_text(briefing_data)
-    if not briefing_text.strip():
-        print("❌ 브리핑 텍스트가 비어 있습니다(종목/시장 데이터 없음). 종료합니다.")
-        sys.exit(1)
-    print(f"✅ 브리핑 텍스트 생성 완료 ({len(briefing_text):,}자, {UPSTREAM_REPO} JSON 기반)")
-
-    briefing_date_str = briefing_data.get("briefing_date", "")
-    briefing_date_iso = _kdate_to_iso(briefing_date_str)
+    briefing_date_str = v3_2_data.get("briefing_date", "")
     if briefing_date_str:
         # 시스템 실행 시각(TODAY) 대신 실제 브리핑이 다루는 날짜를 사용 — 워크플로우가
         # 조기 실행되어 전날 데이터로 생성되더라도 영상에는 데이터 기준 날짜가 정확히 표시된다.
         TODAY = briefing_date_str
-        print(f"📅 브리핑 날짜: {TODAY} (실제 브리핑 데이터 기준)")
+        print(f"📅 브리핑 날짜: {TODAY} (V3_2 데이터 기준)")
 
-    # market_data 파싱 (기존 v3 스키마와 동일 — 소스만 UPSTREAM_REPO로 변경)
-    market_data = None
-    md = briefing_data.get("market_data") or {}
-    if md:
-        def _fmt_value(v):
-            if v is None: return ""
-            return f"{v:,.2f}" if isinstance(v, float) else str(v)
+    length_tier = v3_2_data.get("length_tier", "shorts")
+    print(f"🎯 길이 티어: {length_tier} (V3_2가 이미 결정 — 여기서 재계산하지 않음)")
 
-        def _fmt_change(pct, direction):
-            if pct is None: return ""
-            sign = "+" if direction == "up" else ("-" if direction == "down" else "")
-            return f"{sign}{abs(pct):.2f}%"
-
-        market_data = {
-            "kospi_value":        _fmt_value(md.get("kospi", {}).get("value")),
-            "kospi_change":       _fmt_change(md.get("kospi", {}).get("change_pct"), md.get("kospi", {}).get("direction")),
-            "kospi_change_positive": md.get("kospi", {}).get("direction") == "up",
-            "kosdaq_value":       _fmt_value(md.get("kosdaq", {}).get("value")),
-            "kosdaq_change":      _fmt_change(md.get("kosdaq", {}).get("change_pct"), md.get("kosdaq", {}).get("direction")),
-            "kosdaq_change_positive": md.get("kosdaq", {}).get("direction") == "up",
-            "nasdaq_value":       _fmt_value(md.get("nasdaq", {}).get("value")),
-            "nasdaq_change":      _fmt_change(md.get("nasdaq", {}).get("change_pct"), md.get("nasdaq", {}).get("direction")),
-            "nasdaq_positive":    md.get("nasdaq", {}).get("direction") == "up",
-            "sp500_value":        _fmt_value(md.get("sp500", {}).get("value")),
-            "sp500_change":       _fmt_change(md.get("sp500", {}).get("change_pct"), md.get("sp500", {}).get("direction")),
-            "sp500_positive":     md.get("sp500", {}).get("direction") == "up",
-            "usdkrw_value":       _fmt_value(md.get("usd_krw", {}).get("value")),
-            "usdkrw_change":      _fmt_change(md.get("usd_krw", {}).get("change_pct"), md.get("usd_krw", {}).get("direction")),
-            "usdkrw_positive":    md.get("usd_krw", {}).get("direction") == "up",
-        }
-        print(f"✅ market_data 로드 완료: KOSPI {market_data['kospi_value']} / NASDAQ {market_data['nasdaq_value']} / USD/KRW {market_data['usdkrw_value']}")
+    if length_tier == "shorts":
+        script = generate_shorts_script(v3_2_data)
     else:
-        print("⚠️ market_data 없음 → 수치 없이 진행")
-
-    # report_update는 증권사 리포트가 핵심이다 — V3_2의 briefing_data.json에는
-    # brokerage_reports가 채워져 있음(비어있으면 그날 리포트가 없었다는 뜻).
-    brokerage_reports = briefing_data.get("brokerage_reports") or None
-    if brokerage_reports and not any(
-        brokerage_reports.get(k) for k in ("simultaneous", "new_coverage", "single_significant")
-    ):
-        brokerage_reports = None
-
-    # ── video_format 결정 (핵심종목 5개 미만 또는 신규성 낮음 → shorts) ──────
-    from report_decision import decide_video_format
-    video_format = decide_video_format(brokerage_reports)
-
-    if video_format == "shorts":
-        script = generate_shorts_script(briefing_text, brokerage_reports)
-    else:
-        # 종목별 실제 발언 인용 (channel_mentions에서 추출 — 기존 build_stock_quotes()는 그대로 재사용)
-        stock_quotes = None
-        synthetic_mentions = build_synthetic_mentions(briefing_data, briefing_date_iso)
-        if synthetic_mentions:
-            grouped = build_stock_quotes(synthetic_mentions, briefing_date_iso)
-            if grouped:
-                stock_quotes = grouped
-                total_quotes = sum(len(v) for v in grouped.values())
-                print(f"✅ 종목별 실제 발언 로드 완료: {len(grouped)}개 종목 / {total_quotes}건")
-        if not stock_quotes:
-            print("⚠️ channel_mentions 없음 → mentions는 생략될 수 있음")
-
-        stock_market_data = build_stock_market_data(briefing_data)
-
-        script = generate_script(briefing_text, market_data, brokerage_reports, stock_quotes,
-                                  stock_market_data)
+        script = generate_update_script(v3_2_data, length_tier)
 
     root     = os.path.join(_HERE, "..")
     out_dir  = os.path.join(root, "output", lang, "scripts")
@@ -1321,4 +650,3 @@ def run(lang: str = "KO"):
 if __name__ == "__main__":
     lang = sys.argv[1] if len(sys.argv) > 1 else "KO"
     run(lang)
-

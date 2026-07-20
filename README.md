@@ -5,50 +5,48 @@
 **report_update**(장중 업데이트, 09:20~10:20 KST, 증권사 리포트+오전장 반영)
 담당 레포입니다.
 
-## 데이터 소스
+## 데이터 소스 & 설계 원칙 (재설계: "1부/2부 연속 시리즈")
 
 **[stock-briefing-v3-2](https://github.com/kunil-choi/stock-briefing-v3-2)**의
 `data/briefing_data.json`을 `raw.githubusercontent.com`으로 직접 소비합니다
-(`stock-briefing-step1`과 동일한 `fetch_briefing_data()`/`build_briefing_text()`
-구조, `UPSTREAM_REPO`만 다름). V3_2는 애널리스트 리포트 수집 + 오전장 반영
-현재가까지 포함된 스냅샷을 발행하므로, 이 레포에서 별도 수집 없이 그대로
-사용합니다.
+(`UPSTREAM_REPO = stock-briefing-v3-2`).
 
-## 조건부 롱폼/쇼츠 (`pipeline/report_decision.py`)
+**설계 원칙**: STEP-1(morning_core)과 STEP-2(report_update)는 "각자 완결된
+브리핑"이 아니라 "하루짜리 연속 시리즈의 1부/2부"다. 예전에는 V3_2가 종목선정을
+처음부터 다시 해서 STEP-2가 STEP-1과 상당 부분 겹치는 "재브리핑"이 되는 문제가
+있었다. 지금은 V3_2가 STEP-1 결과물 위에 새 정보(오전장 반응/증권사 리포트
+심화분석/AI전략 업데이트)만 얹어 내려주므로, 이 레포는 그 내용을 **처음부터
+재분석하지 않고 방송 나레이션으로 변환하기만 한다** (`generate_script.py`의
+`generate_update_script()`).
 
-요구사항: *"리포트 핵심 종목 수가 5개 미만이거나 신규성이 낮으면 롱폼 대신
-쇼츠/커뮤니티용 요약만 생성한다."*
+## 3단계 길이 티어 (`shorts` / `mid` / `full`)
 
-- `count_core_stocks(brokerage_reports)` — simultaneous/new_coverage/
-  single_significant에 등장한 종목명을 중복 제거해 카운트.
-- `is_low_novelty(brokerage_reports)` — Phase 1 휴리스틱:
-  `new_coverage == 0 and simultaneous <= 1`이면 "신규성 낮음". (더 정교한
-  `ranking_score` 기반 판단은 후속 단계에서 교체 예정.)
-- `decide_video_format()` → `"longform"` 또는 `"shorts"`.
+고정 15분 목표는 폐기하고, 리포트 볼륨에 비례한 가변 길이를 쓴다. 티어 결정
+자체는 **이 레포가 아니라 V3_2**(`decide_length_tier()`, 리포트 핵심종목 수
+기준)가 먼저 끝내서 `briefing_data.json`의 `length_tier` 필드로 내려주고,
+이 레포는 그 값을 그대로 신뢰해 사용할 뿐 재계산하지 않는다(옛
+`pipeline/report_decision.py`는 삭제됨).
 
-`pipeline/generate_script.py`의 `run()`이 이 값을 매 실행마다 계산해
-`script.json`의 `video_format` 필드에 기록하고, 이후 모든 단계
-(`generate_assets.py`, `generate_video.py`, `generate_metadata.py`,
-`quality_gate.py`, 워크플로우의 TTS/길이 검증)가 이 값을 읽어 분기합니다.
+| 티어 | 핵심종목 수 | 목표 길이 | 구성 |
+|---|---|---|---|
+| `shorts` | 5개 미만 | 30~60초 | 오프닝 + 리포트 하이라이트 1문단 + 클로징 |
+| `mid`    | 5~14개   | 5~8분    | 오프닝 + 리캡 + 오전장 반응 + 리포트 브리핑 + 전략 업데이트(1문장 축약) + 클로징 |
+| `full`   | 15개 이상 | 8~15분   | mid와 동일 + 전략 업데이트 전체 |
 
-- **longform**: 기존 `stock-briefing-video`와 동일한 다중 섹션 구조
-  (시장요약/업종분석/종목별 상세/집계 섹션/AI전략), 목표 13~20분.
-- **shorts**: `generate_shorts_script()`가 단일 LLM 호출로 만드는 3섹션
-  (`opening` / `highlight` / `closing`)짜리 축소 스크립트, 목표 30~60초.
-  렌더링은 `pipeline/assets/builders.build_shorts_highlight()`가 담당하며,
-  `generate_assets.py`가 `video_format=="shorts"`일 때 market_summary/
-  sector/종목카드/AI전략 빌더 호출을 건너뜁니다.
+`pipeline/generate_script.py`의 `run()`이 `script.json`의 `video_format`
+필드에 이 값을 그대로 기록하고, 이후 모든 단계(`generate_assets.py`,
+`generate_video.py`, `generate_metadata.py`, `quality_gate.py`, 워크플로우의
+TTS/길이 검증)가 이 값을 읽어 분기합니다.
 
-> ⚠️ shorts 경로는 이번 구현에서 새로 추가된 코드라 longform 대비 실제
-> GitHub Actions 환경에서의 종단간 검증 횟수가 적습니다. 처음 shorts로
-> 분기되는 날은 워크플로우 로그와 산출물을 한 번 직접 확인해보시는 걸
-> 권장합니다.
+> ⚠️ mid/full 경로는 이번 재설계에서 새로 추가된 코드라 실제 GitHub Actions
+> 환경에서의 종단간 검증 횟수가 적습니다. 처음 실행될 때 워크플로우 로그와
+> 산출물을 한 번 직접 확인해보시는 걸 권장합니다.
 
 ## 트리거 체인
 
 ```
 stock-briefing-v3-2 완료 → workflow_dispatch → report_update.yml
-  script (video_format 결정) → voice / assets → video → generate_metadata.py → quality_gate.py
+  script (V3_2가 결정한 length_tier 그대로 사용) → voice / assets → video → generate_metadata.py → quality_gate.py
 ```
 
 자체 cron은 없습니다(V3_2가 끝나기 전에 실행되면 날짜 불일치 위험).
@@ -57,15 +55,15 @@ stock-briefing-v3-2 완료 → workflow_dispatch → report_update.yml
 
 | 파일 | 역할 |
 |---|---|
-| `config/schedule.yml` | `briefing_type: report_update`, 실행 창(09:20~10:20), `report_decision.min_core_stocks: 5` |
-| `pipeline/report_decision.py` | video_format 결정 로직 (신규) |
-| `pipeline/generate_script.py` | `UPSTREAM_REPO`를 V3_2로 변경, `generate_shorts_script()` 추가, `run()`에 video_format 분기 추가 |
-| `pipeline/assets/builders.py`의 `build_shorts_highlight()` | shorts 전용 단일 슬라이드 렌더링(추가된 함수) |
-| `pipeline/generate_assets.py` | `video_format=="shorts"`일 때 롱폼 전용 빌더 호출 스킵 |
-| `pipeline/generate_subtitles.py`, `pipeline/generate_video.py`, `pipeline/quality_gate.py` | 프레임→오디오 ID 매핑 테이블에 `05_highlight → highlight` 패턴 추가 |
-| `pipeline/generate_metadata.py` | `video_format`을 script.json에서 동적으로 읽도록 변경(정적 설정값이 아님) — 제목/썸네일/오프닝 문구가 morning_core와 겹치지 않도록 `TITLE_TEMPLATES`가 `briefing_type`별로 분리돼 있음 |
-| `.github/workflows/report_update.yml` | `workflow_dispatch`만 사용, `script` job이 감지한 `video_format`을 `voice`(TTS 최소 개수)/`video`(목표 길이) job에 전달 |
+| `config/schedule.yml` | `briefing_type: report_update`, 실행 창(09:20~10:20), `duration.{shorts,mid,full}` |
+| `pipeline/generate_script.py` | `UPSTREAM_REPO`를 V3_2로 변경. STEP-1 재브리핑용 다중 호출 파이프라인(`_generate_core`/`_generate_stock_section` 등, 옛 스키마 전용)을 전부 제거하고 `generate_update_script()`(mid/full, 단일 호출) + `generate_shorts_script()`(신규 스키마용으로 교체)로 재작성 |
+| `pipeline/assets/builders.py`의 `build_recap()`/`build_reaction()`/`build_report_briefing()` | 리캡/오전장반응/리포트브리핑 슬라이드(신규, 기존 `_build_aggregate_stock_slide()` 재사용) |
+| `pipeline/generate_assets.py` | 옛 롱폼 빌더(시장요약/섹터/종목카드) 호출 제거, mid/full은 recap→reaction→briefing→(full만)ai_strategy 순으로 렌더링 |
+| `pipeline/generate_subtitles.py`, `pipeline/generate_video.py` | 프레임→오디오 ID 매핑 테이블에 `02_recap`/`03_reaction`/`04_briefing` 패턴 추가 |
+| `pipeline/generate_metadata.py` | `TITLE_TEMPLATES`에 `report_update_mid` 추가, `report_update_longform` → `report_update_full`로 정정(안 그러면 mid/full 둘 다 morning_core 제목으로 폴백되는 버그) |
+| `.github/workflows/report_update.yml` | `script` job이 V3_2가 결정한 `video_format`(shorts/mid/full)을 감지해 `voice`(TTS 최소 개수 3/4/6)·`video`(목표 길이) job에 전달 |
 
+`pipeline/report_decision.py`는 삭제됐습니다(티어 결정이 V3_2로 이동).
 그 외 파일은 `stock-briefing-step1`에서 무수정 복사했습니다.
 
 ## 산출물

@@ -34,10 +34,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SCRIPT_MOCK: ${{ inputs.dry_run && '1' || '' }}
         run: python pipeline/generate_script.py KO
-      - name: video_format 감지 (report_decision.py가 script.json에 기록한 값)
+      - name: video_format 감지 (stock-briefing-v3-2가 이미 결정해 script.json에 기록한 값)
         id: detect_format
         run: |
-          FORMAT=$(python -c "import json; print(json.load(open('output/KO/scripts/script.json')).get('video_format','longform'))")
+          FORMAT=$(python -c "import json; print(json.load(open('output/KO/scripts/script.json')).get('video_format','shorts'))")
           echo "video_format=${FORMAT}" >> "$GITHUB_OUTPUT"
           echo "감지된 video_format: ${FORMAT}"
       - uses: actions/upload-artifact@v4
@@ -73,8 +73,10 @@ jobs:
           echo "총 MP3 파일 수: $total (video_format=${VIDEO_FORMAT})"
           if [ "$VIDEO_FORMAT" = "shorts" ]; then
             MIN_FILES=3   # opening / highlight / closing
+          elif [ "$VIDEO_FORMAT" = "mid" ]; then
+            MIN_FILES=4   # opening / recap / briefing / closing (reaction·ai_strategy는 데이터 없으면 생략 가능)
           else
-            MIN_FILES=5
+            MIN_FILES=6   # opening / recap / reaction / briefing / ai_strategy / closing
           fi
           if [ "$total" -lt "$MIN_FILES" ]; then
             echo "❌ MP3 파일이 너무 적습니다 ($total개 < ${MIN_FILES}개). TTS 실패 가능성."
@@ -156,9 +158,12 @@ jobs:
           if [ "$VIDEO_FORMAT" = "shorts" ]; then
             export TARGET_MIN_SECONDS=30
             export TARGET_MAX_SECONDS=60
+          elif [ "$VIDEO_FORMAT" = "mid" ]; then
+            export TARGET_MIN_SECONDS=300
+            export TARGET_MAX_SECONDS=480
           else
-            export TARGET_MIN_SECONDS=780
-            export TARGET_MAX_SECONDS=1200
+            export TARGET_MIN_SECONDS=480
+            export TARGET_MAX_SECONDS=900
           fi
           echo "TARGET_MIN_SECONDS=${TARGET_MIN_SECONDS} / TARGET_MAX_SECONDS=${TARGET_MAX_SECONDS} (video_format=${VIDEO_FORMAT})"
           python pipeline/generate_video.py KO
@@ -169,9 +174,12 @@ jobs:
           if [ "$VIDEO_FORMAT" = "shorts" ]; then
             export TARGET_MIN_SECONDS=30
             export TARGET_MAX_SECONDS=60
+          elif [ "$VIDEO_FORMAT" = "mid" ]; then
+            export TARGET_MIN_SECONDS=300
+            export TARGET_MAX_SECONDS=480
           else
-            export TARGET_MIN_SECONDS=780
-            export TARGET_MAX_SECONDS=1200
+            export TARGET_MIN_SECONDS=480
+            export TARGET_MAX_SECONDS=900
           fi
           python pipeline/quality_gate.py KO
       - name: 📦 배포 산출물 업로드 준비

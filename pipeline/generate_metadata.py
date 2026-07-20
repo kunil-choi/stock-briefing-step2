@@ -28,9 +28,10 @@ from config_schedule import BRIEFING_TYPE, DEFAULT_VIDEO_FORMAT
 KST = timezone(timedelta(hours=9))
 
 TITLE_TEMPLATES = {
-    "morning_core": "[개장전 브리핑] {date} 주식시장 오늘의 주도주는? | KBS 머니올라",
-    "report_update_longform": "[장중 업데이트] {date} 증권사 리포트 총정리 | KBS 머니올라",
-    "report_update_shorts":   "[속보] {date} 증권사가 주목한 종목 | KBS 머니올라",
+    "morning_core":          "[개장전 브리핑] {date} 주식시장 오늘의 주도주는? | KBS 머니올라",
+    "report_update_full":    "[장중 업데이트] {date} 증권사 리포트 총정리 | KBS 머니올라",
+    "report_update_mid":     "[장중 업데이트] {date} 오전장 반응 + 리포트 브리핑 | KBS 머니올라",
+    "report_update_shorts":  "[속보] {date} 증권사가 주목한 종목 | KBS 머니올라",
 }
 
 BASE_TAGS = ["주식", "주식브리핑", "증시", "코스피", "코스닥", "KBS머니올라", "재테크"]
@@ -149,9 +150,10 @@ def run(lang: str = "KO"):
     with open(script_path, "r", encoding="utf-8") as f:
         script = json.load(f)
 
-    # video_format은 script.json에 report_decision.decide_video_format()이 이미
-    # 기록해둔 값을 우선 사용한다(step2 report_update 전용). morning_core(step1)는
-    # 이 필드를 쓰지 않으므로 config의 기본값(longform)으로 자연히 폴백된다.
+    # video_format(shorts|mid|full)은 stock-briefing-v3-2가 이미 리포트
+    # 볼륨 기준으로 결정해 script.json에 기록해둔 값을 그대로 쓴다(step2에서
+    # 재계산하지 않음). morning_core(step1)는 이 필드를 쓰지 않으므로 config의
+    # 기본값으로 자연히 폴백된다.
     video_format = script.get("video_format", DEFAULT_VIDEO_FORMAT)
 
     date_iso = _kdate_to_iso(script.get("date", ""))

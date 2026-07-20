@@ -12,22 +12,21 @@ with open(_SCHEDULE_PATH, "r", encoding="utf-8") as _f:
 BRIEFING_TYPE   = _CFG.get("briefing_type", "morning_core")
 WINDOW_START    = (_CFG.get("window") or {}).get("start", "07:10")
 WINDOW_END      = (_CFG.get("window") or {}).get("end", "08:20")
-REPORT_DECISION = _CFG.get("report_decision") or {}
 DURATION        = _CFG.get("duration") or {}
-DEFAULT_VIDEO_FORMAT = _CFG.get("default_video_format", "longform")
+DEFAULT_VIDEO_FORMAT = _CFG.get("default_video_format", "shorts")
 
 
 def duration_for(video_format: str) -> dict:
-    """video_format("longform"|"shorts")에 해당하는 {min_seconds, max_seconds} 반환.
-    정의가 없으면 longform 값으로 폴백."""
-    return DURATION.get(video_format) or DURATION.get("longform") or {
-        "min_seconds": 780, "max_seconds": 1200,
+    """video_format("shorts"|"mid"|"full")에 해당하는 {min_seconds, max_seconds}
+    반환. 정의가 없으면 shorts 값으로 폴백(콘텐츠 부족 시 억지로 늘리는 것보다
+    안전)."""
+    return DURATION.get(video_format) or DURATION.get("shorts") or {
+        "min_seconds": 30, "max_seconds": 60,
     }
 
 
 if __name__ == "__main__":
     print(f"BRIEFING_TYPE   = {BRIEFING_TYPE}")
     print(f"WINDOW          = {WINDOW_START} ~ {WINDOW_END}")
-    print(f"REPORT_DECISION = {REPORT_DECISION}")
     print(f"DURATION        = {DURATION}")
     print(f"DEFAULT_VIDEO_FORMAT = {DEFAULT_VIDEO_FORMAT}")

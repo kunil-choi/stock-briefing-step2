@@ -31,10 +31,10 @@ def check_metadata(root: str = ".") -> None:
     if meta.get("status") not in ("success", "partial"):
         raise SystemExit(f"metadata.json status={meta.get('status')!r} — 실패로 표시됨 ({meta_path})")
 
-    # video_format에 맞는 길이 범위로 검증 (longform/shorts 분기)
+    # video_format에 맞는 길이 범위로 검증 (shorts/mid/full 3단계 티어)
     try:
         from config_schedule import duration_for
-        bounds = duration_for(meta.get("video_format", "longform"))
+        bounds = duration_for(meta.get("video_format", "shorts"))
     except Exception:
         bounds = {"min_seconds": TARGET_MIN_SECONDS, "max_seconds": TARGET_MAX_SECONDS}
 
