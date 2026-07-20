@@ -403,8 +403,9 @@ _UPDATE_SYSTEM_PROMPT = """
    "그때 이후 실제로 어떻게 움직였는지"를 서술하세요. 데이터가 없으면 빈
    문자열로 두세요.
 3. briefing: 증권사 리포트 심화분석/섹터테마를 나레이션으로 재구성하세요.
-   섹터 테마가 있으면 먼저 테마로 도입한 뒤 종목별로 이어가세요. 제공된
-   analysis 내용 외의 사실을 새로 지어내지 마세요.
+   섹터 테마가 있으면 먼저 테마로 도입한 뒤 종목별로 이어가세요. category가
+   "single_significant"인 종목은 "오늘의 픽"으로 소개하듯 자연스럽게
+   강조하세요. 제공된 analysis 내용 외의 사실을 새로 지어내지 마세요.
 4. strategy: 아침 전략을 처음부터 다시 쓰지 말고 "무엇이 보강됐는지"
    중심으로 3~5문장으로 작성하세요.
 
@@ -453,7 +454,6 @@ def generate_update_script(v3_2_data: dict, length_tier: str) -> dict:
         for label, names in (
             ("대형주도주", recap.get("market_leaders", [])),
             ("관심종목",   recap.get("stocks", [])),
-            ("오늘의 픽",  recap.get("hidden_picks", [])),
         ):
             if names:
                 items.append({"name": label, "text": ", ".join(names)})
@@ -493,7 +493,10 @@ def generate_update_script(v3_2_data: dict, length_tier: str) -> dict:
         for s in briefing.get("stocks", []) or []:
             brokers = s.get("brokers", [])
             brokers_str = ", ".join(brokers) if isinstance(brokers, list) else str(brokers)
-            items.append({"name": s.get("name", ""), "text": f"({brokers_str}) {s.get('analysis', '')}"})
+            name = s.get("name", "")
+            if s.get("category") == "single_significant":
+                name = f"💎 오늘의 픽 — {name}"
+            items.append({"name": name, "text": f"({brokers_str}) {s.get('analysis', '')}"})
         sections.append({
             "id": "briefing", "label": "증권사 리포트 브리핑",
             "corner_summary": "오늘의 증권사 리포트",
