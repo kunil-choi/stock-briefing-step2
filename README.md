@@ -45,11 +45,14 @@ TTS/길이 검증)가 이 값을 읽어 분기합니다.
 ## 트리거 체인
 
 ```
-stock-briefing-v3-2 완료 → workflow_dispatch → report_update.yml
+(수동) workflow_dispatch → report_update.yml
   script (V3_2가 결정한 length_tier 그대로 사용) → voice / assets → video → generate_metadata.py → quality_gate.py
 ```
 
-자체 cron은 없습니다(V3_2가 끝나기 전에 실행되면 날짜 불일치 위험).
+과금(OpenAI/TTS) 방지를 위해 `stock-briefing-v3-2`의 자동 dispatch를 제거했습니다.
+`stock-briefing-v3-2`의 `docs/index.html`로 데이터가 준비됐는지 사람이 먼저 확인한
+뒤, 이 레포 Actions 탭에서 수동으로 `workflow_dispatch`를 실행하세요. 자체 cron도
+없습니다.
 
 ## 신규 구성 요소 (`stock-briefing-step1` 대비 추가/변경)
 
