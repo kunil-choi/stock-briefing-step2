@@ -1,6 +1,7 @@
 # pipeline/assets/config.py
 import os
 import re
+from typing import Optional
 
 W, H = 1920, 1080
 
@@ -262,3 +263,24 @@ NEWS_IMAGE_FALLBACKS = {
     "HD현대중공업":   "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/HD_Hyundai_logo.svg/800px-HD_Hyundai_logo.svg.png",
     "한국항공우주":   "https://upload.wikimedia.org/wikipedia/ko/thumb/9/9e/Korea_Aerospace_Industries_logo.png/320px-Korea_Aerospace_Industries_logo.png",
 }
+
+
+# ── 섹터 fallback 이미지 (media_pipeline 최종 폴백용) ──────────────────────
+# 연합뉴스/KBS(+naver_discovery) 검색이 모두 실패했을 때 쓸 이미지.
+# stock-briefing-step1의 assets/sector_fallback/을 그대로 이식했다. 이 레포는
+# 종목→섹터 매핑 사전(STOCK_SECTORS)을 따로 두지 않으므로, 섹터명이 주어지면
+# 그 이름의 파일을 찾고 없으면 항상 default.jpg로 폴백한다.
+_SECTOR_FALLBACK_DIR = os.path.join(_BASE, "..", "assets", "sector_fallback")
+SECTOR_FALLBACK_DEFAULT = os.path.join(_SECTOR_FALLBACK_DIR, "default.jpg")
+
+
+def get_sector_fallback_image(sector: str) -> Optional[str]:
+    """섹터명에 해당하는 fallback 이미지 파일 경로를 반환합니다. 없으면
+    default.jpg → None 순으로 폴백합니다."""
+    if sector:
+        path = os.path.join(_SECTOR_FALLBACK_DIR, f"{sector}.jpg")
+        if os.path.isfile(path):
+            return path
+    if os.path.isfile(SECTOR_FALLBACK_DEFAULT):
+        return SECTOR_FALLBACK_DEFAULT
+    return None

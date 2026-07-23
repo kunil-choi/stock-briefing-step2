@@ -1,6 +1,13 @@
-# config/schedule.yml
-# briefing_type/video_format 및 이 레포의 실행 창(window)을 정의한다.
+# briefing_type 및 이 레포의 실행 창(window)/목표 길이를 정의한다.
 # pipeline/config_schedule.py가 이 파일을 로드해 상수로 노출한다.
+#
+# 재설계: 증권사 리포트 종합 "전용" 콘텐츠로 범위를 좁히면서(리캡/오전장반응/
+# AI전략 업데이트 섹션 제거), 리포트 볼륨에 따라 30초~15분을 오가던 3단계
+# 가변 길이 티어(shorts/mid/full)를 폐기했다. 유튜브 알고리즘은 같은 슬롯이
+# 매일 다른 길이로 나오면 시청자 습관·추천 신호 학습이 흐려지고, 시청자도
+# "오늘은 몇 분짜리인지" 예측이 안 되면 시청을 미루는 경향이 있다 — 매일
+# 같은 길이대(미드폼 고정)를 유지하는 편이 노출·시청 습관 형성에 유리하다는
+# 판단.
 
 briefing_type: report_update   # morning_core | report_update
 
@@ -8,24 +15,11 @@ window:
   start: "09:20"   # 이 시각 이전에 트리거되면 비정상(모니터링 기준)
   end:   "10:20"   # 이 시각을 넘겨 완료되면 SLA 위반으로 로그에 경고 표시
 
-# video_format(길이 티어) 결정은 이제 이 레포가 아니라 stock-briefing-v3-2
-# (analyzer/report_update_analyzer.py의 decide_length_tier())가 리포트
-# 핵심종목 수 기준으로 미리 결정해 data/briefing_data.json에 실어 보낸다.
-# 이 레포는 그 값을 그대로 신뢰해 사용할 뿐 재계산하지 않는다
-# (예전 pipeline/report_decision.py의 shorts/longform 이진 판단은 폐기됨).
-
+# 고정 미드폼 목표 길이(초). 리포트 핵심종목 수가 적은 날에도 억지로 30초
+# shorts로 축소하지 않고, generate_script.py가 항상 이 범위를 목표로 증권사
+# 리포트 내용을 방송 나레이션으로 구성한다(종목 수가 적으면 종목별 설명을
+# 더 깊게 다뤄 분량을 채우도록 프롬프트에 명시 — 콘텐츠 없는 필러로 채우지
+# 않는다).
 duration:
-  full:
-    min_seconds: 480    # 8분
-    max_seconds: 900    # 15분
-  mid:
-    min_seconds: 300    # 5분
-    max_seconds: 480    # 8분
-  shorts:
-    min_seconds: 30
-    max_seconds: 60
-
-# script.json에 video_format이 없을 때(비정상 상황)의 안전한 폴백 —
-# 콘텐츠가 부족할 때 억지로 길게 늘리는 위험을 피하기 위해 가장 짧은
-# 티어로 폴백한다.
-default_video_format: shorts
+  min_seconds: 300    # 5분
+  max_seconds: 480    # 8분

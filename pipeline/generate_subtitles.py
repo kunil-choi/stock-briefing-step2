@@ -8,18 +8,10 @@ ASS(Advanced SubStation Alpha) 자막 파일 생성 모듈
 - 자막은 한글 맞춤법 준수, 숫자/영어 원문 표기, 뜻을 () 안에 병기합니다.
 - 긴 자막은 적절한 길이로 자동 분할합니다.
 
-프레임 파일명 → 오디오 ID 매핑 규칙:
-  00_opening.png             → opening.mp3
-  01_market_00.png           → market_summary.mp3
-  02_sector.png              → sectors.mp3
-  10_삼성전자_1_summary.png  → stock_삼성전자_summary.mp3
-  10_삼성전자_3_mention.png  → stock_삼성전자_mention.mp3
-  10_삼성전자_3_mention_00.png → stock_삼성전자_mention_00.mp3
-  90_extra_watchlist.png     → stock_추가관심종목.mp3
-  91_today_pick.png          → stock_오늘의픽.mp3
-  92_brokerage_report.png    → stock_증권사리포트.mp3
-  98_ai_strategy.png         → ai_strategy.mp3
-  99_closing.png             → closing.mp3
+프레임 파일명 → 오디오 ID 매핑 규칙 (증권사 리포트 종합 전용 재설계 후 고정 3섹션):
+  00_opening.png   → opening.mp3
+  01_briefing.png  → briefing.mp3
+  99_closing.png   → closing.mp3
 """
 import os
 import sys
@@ -106,19 +98,10 @@ def _frame_stem_to_audio_id(stem: str, sections: list) -> str:
       98_ai_strategy         → ai_strategy
       99_closing             → closing
     """
-    # 고정 패턴 (정확한 매핑)
+    # 고정 패턴 (정확한 매핑) — 재설계 후 opening/briefing/closing 3섹션 고정
     fixed_patterns = [
         (r'^00_opening$',           'opening'),
-        (r'^01_market',             'market_summary'),
-        (r'^02_sector',             'sectors'),
-        (r'^02_recap$',             'recap'),       # video_format in (mid, full) 전용
-        (r'^03_reaction$',          'reaction'),    # video_format in (mid, full) 전용
-        (r'^04_briefing$',          'briefing'),    # video_format in (mid, full) 전용
-        (r'^05_highlight$',         'highlight'),   # video_format=="shorts" 전용
-        (r'^90_extra_watchlist$',   'stock_추가관심종목'),
-        (r'^91_today_pick$',        'stock_오늘의픽'),
-        (r'^92_brokerage_report$',  'stock_증권사리포트'),
-        (r'^98_ai_strategy',        'ai_strategy'),
+        (r'^01_briefing$',          'briefing'),
         (r'^99_closing',            'closing'),
     ]
     for pattern, audio_id in fixed_patterns:

@@ -8,8 +8,8 @@ on:
     inputs:
       dry_run:
         description: >-
-          드라이런 모드 — OpenAI/TTS를 실제로 호출하지 않고
-          (SCRIPT_MOCK/TTS_MOCK) 파이프라인 전체를 무료로 검증만 한다.
+          드라이런 모드 — OpenAI/TTS/미디어 검색을 실제로 호출하지 않고
+          (SCRIPT_MOCK/TTS_MOCK/MEDIA_MOCK) 파이프라인 전체를 무료로 검증만 한다.
         type: boolean
         default: false
 
@@ -20,26 +20,16 @@ jobs:
   script:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      video_format: ${{ steps.detect_format.outputs.video_format }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: |
-          pip install openai playwright Pillow pandas matplotlib pykrx requests python-dotenv pyyaml
-          playwright install chromium
+      - run: pip install openai requests python-dotenv pyyaml
       - env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SCRIPT_MOCK: ${{ inputs.dry_run && '1' || '' }}
         run: python pipeline/generate_script.py KO
-      - name: video_format 감지 (stock-briefing-v3-2가 이미 결정해 script.json에 기록한 값)
-        id: detect_format
-        run: |
-          FORMAT=$(python -c "import json; print(json.load(open('output/KO/scripts/script.json')).get('video_format','shorts'))")
-          echo "video_format=${FORMAT}" >> "$GITHUB_OUTPUT"
-          echo "감지된 video_format: ${FORMAT}"
       - uses: actions/upload-artifact@v4
         with:
           name: script
@@ -54,43 +44,54 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install openai requests Pillow>=10.0.0
+      - run: |
+          pip install openai requests Pillow>=10.0.0 pyyaml
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg  # atempo/loudnorm 후처리에 필요
       - uses: actions/download-artifact@v4
         with:
           name: script
           path: output/KO/scripts/
       - env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 아래 두 provider는 Secret이 등록되면 config/audio.yml의
+          # provider_priority(azure→elevenlabs→openai) 순서대로 자동으로
+          # 사용된다(키가 없으면 OpenAI로 폴백 — 코드 변경 불필요).
+          # ELEVENLABS_VOICE_ID는 pipeline/update_voice_id.py로 voice_sample/의
+          # 녹음에서 미리 만들어둔 클론 목소리 ID를 등록해야 실제 클론 음성이
+          # 나온다(1회성 수동 준비 — README 참고).
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
           TTS_MOCK: ${{ inputs.dry_run && '1' || '' }}
         run: python pipeline/generate_voice.py KO
-      - name: TTS 결과 검증 (video_format에 따라 최소 개수 다름)
-        env:
-          VIDEO_FORMAT: ${{ needs.script.outputs.video_format }}
+      - name: TTS 결과 검증
         run: |
           echo "=== 생성된 오디오 파일 목록 ==="
           ls -lh output/KO/audio/ || echo "audio 폴더 없음"
           total=$(ls output/KO/audio/*.mp3 2>/dev/null | wc -l)
-          echo "총 MP3 파일 수: $total (video_format=${VIDEO_FORMAT})"
-          if [ "$VIDEO_FORMAT" = "shorts" ]; then
-            MIN_FILES=3   # opening / highlight / closing
-          elif [ "$VIDEO_FORMAT" = "mid" ]; then
-            MIN_FILES=4   # opening / recap / briefing / closing (reaction·ai_strategy는 데이터 없으면 생략 가능)
-          else
-            MIN_FILES=6   # opening / recap / reaction / briefing / ai_strategy / closing
-          fi
-          if [ "$total" -lt "$MIN_FILES" ]; then
-            echo "❌ MP3 파일이 너무 적습니다 ($total개 < ${MIN_FILES}개). TTS 실패 가능성."
+          echo "총 MP3 파일 수: $total"
+          if [ "$total" -lt 3 ]; then
+            echo "❌ MP3 파일이 너무 적습니다 ($total개 < 3개: opening/briefing/closing). TTS 실패 가능성."
             exit 1
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: voice
           path: output/KO/audio/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio_report
+          path: output/KO/audio_report.json
 
   assets:
     needs: [script]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # media 스텝이 7일 중복 감지용 data/media/license_log.csv를 레포에 커밋해야
+    # 하므로 이 잡에 한해 write 권한이 필요하다(워크플로우 전체 기본값은 read로 유지).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -100,24 +101,55 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y fonts-noto-cjk fonts-noto-cjk-extra ffmpeg
           fc-cache -fv
-          pip install requests Pillow>=10.0.0 pykrx matplotlib pandas mplfinance python-dotenv playwright
+          pip install requests Pillow>=10.0.0 pyyaml playwright imagehash
           playwright install --with-deps chromium
       - uses: actions/download-artifact@v4
         with:
           name: script
           path: output/KO/scripts/
+      # generate_assets.py가 media_map.json(오프닝 배경 사진/리포트 종목 썸네일)을
+      # 읽어 프레임에 반영하므로, 반드시 generate_media.py보다 먼저 실행되면 안 된다.
+      - name: 🖼️ media_map.json 생성 (연합뉴스/KBS 이미지 검색)
+        env:
+          YONHAP_API_KEY: ${{ secrets.YONHAP_API_KEY }}
+          KBS_API_KEY: ${{ secrets.KBS_API_KEY }}
+          # naver_discovery 커넥터(config/media.yml) — 네이버 뉴스 검색으로
+          # yonhap/kbs 자체 검색이 못 찾은 키워드를 보완한다. 시크릿이 없으면
+          # 커넥터가 자동으로 빈 결과만 반환한다(안전한 기본값).
+          NAVER_SEARCH_CLIENT_ID: ${{ secrets.NAVER_SEARCH_CLIENT_ID }}
+          NAVER_SEARCH_CLIENT_SECRET: ${{ secrets.NAVER_SEARCH_CLIENT_SECRET }}
+          ENABLE_NAVER_DISCOVERY: ${{ secrets.NAVER_SEARCH_CLIENT_ID && 'true' || 'false' }}
+          MEDIA_MOCK: ${{ inputs.dry_run && '1' || '' }}
+        run: python pipeline/generate_media.py KO
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media
+          path: output/KO/media/
       - run: python pipeline/generate_assets.py KO
       - uses: actions/upload-artifact@v4
         with:
           name: assets
           path: output/KO/frames/
+      - name: 📇 license_log.csv 커밋 (7일 중복 감지 유지용)
+        # 드라이런은 MEDIA_MOCK의 가짜(mock://...) 항목을 남기므로, 실제 중복
+        # 감지 로그를 오염시키지 않도록 커밋 자체를 건너뛴다.
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ -n "$(git status --porcelain data/media/license_log.csv 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/media/license_log.csv
+            git commit -m "chore: license_log.csv 업데이트 ($(TZ='Asia/Seoul' date +'%Y-%m-%d'))"
+            git pull --rebase
+            git push
+          else
+            echo "license_log.csv 변경 없음 → 커밋 생략"
+          fi
 
   video:
     needs: [script, voice, assets]
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      VIDEO_FORMAT: ${{ needs.script.outputs.video_format }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -127,10 +159,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y fonts-noto-cjk fonts-noto-cjk-extra ffmpeg libass-dev libass9
           fc-cache -fv
-          # generate_metadata.py의 build_thumbnail()이 assets/builders.py → assets/chart.py를
-          # import하는데, 거기서 pandas/matplotlib/pykrx/mplfinance가 필요하다
-          # (이 job의 설치 목록에 빠져 있어 "ModuleNotFoundError: pandas"로 실패하던 버그).
-          pip install openai requests Pillow>=10.0.0 pyyaml playwright pandas matplotlib pykrx mplfinance
+          pip install openai requests Pillow>=10.0.0 pyyaml playwright
           playwright install --with-deps chromium
       - uses: actions/download-artifact@v4
         with:
@@ -142,8 +171,16 @@ jobs:
           path: output/KO/audio/
       - uses: actions/download-artifact@v4
         with:
+          name: audio_report
+          path: output/KO/
+      - uses: actions/download-artifact@v4
+        with:
           name: assets
           path: output/KO/frames/
+      - uses: actions/download-artifact@v4
+        with:
+          name: media
+          path: output/KO/media/
       - name: asset_map.json 생성
         run: |
           python - <<'PY'
@@ -153,35 +190,18 @@ jobs:
           json.dump({'frames': frames, 'lang': 'KO'}, open('output/KO/asset_map.json','w',encoding='utf-8'), ensure_ascii=False, indent=2)
           PY
       - run: python pipeline/generate_subtitles.py KO
-      - name: 🎬 영상 합성 (video_format에 따라 목표 길이 다름)
-        run: |
-          if [ "$VIDEO_FORMAT" = "shorts" ]; then
-            export TARGET_MIN_SECONDS=30
-            export TARGET_MAX_SECONDS=60
-          elif [ "$VIDEO_FORMAT" = "mid" ]; then
-            export TARGET_MIN_SECONDS=300
-            export TARGET_MAX_SECONDS=480
-          else
-            export TARGET_MIN_SECONDS=480
-            export TARGET_MAX_SECONDS=900
-          fi
-          echo "TARGET_MIN_SECONDS=${TARGET_MIN_SECONDS} / TARGET_MAX_SECONDS=${TARGET_MAX_SECONDS} (video_format=${VIDEO_FORMAT})"
-          python pipeline/generate_video.py KO
+      - name: 🎬 영상 합성 (고정 미드폼 5~8분)
+        env:
+          TARGET_MIN_SECONDS: "300"
+          TARGET_MAX_SECONDS: "480"
+        run: python pipeline/generate_video.py KO
       - name: 📋 YouTube 메타데이터 생성 (제목/설명/태그/썸네일)
         run: python pipeline/generate_metadata.py KO
       - name: ✅ 결과물 검증 (영상 길이 + metadata.json)
-        run: |
-          if [ "$VIDEO_FORMAT" = "shorts" ]; then
-            export TARGET_MIN_SECONDS=30
-            export TARGET_MAX_SECONDS=60
-          elif [ "$VIDEO_FORMAT" = "mid" ]; then
-            export TARGET_MIN_SECONDS=300
-            export TARGET_MAX_SECONDS=480
-          else
-            export TARGET_MIN_SECONDS=480
-            export TARGET_MAX_SECONDS=900
-          fi
-          python pipeline/quality_gate.py KO
+        env:
+          TARGET_MIN_SECONDS: "300"
+          TARGET_MAX_SECONDS: "480"
+        run: python pipeline/quality_gate.py KO
       - name: 📦 배포 산출물 업로드 준비
         run: |
           DATE_DIR=$(TZ='Asia/Seoul' date +'%Y-%m-%d')

@@ -4,19 +4,10 @@ pipeline/generate_video.py
 KBS 머니올라 — 동영상 합성 모듈
 PNG 프레임 + MP3 오디오 + ASS 자막 → MP4
 
-프레임 → 오디오 매핑 규칙:
-  00_opening.png             → opening.mp3
-  01_market_00.png           → market_summary.mp3
-  02_sector.png              → sectors.mp3
-  NN_종목명_1_summary.png    → stock_종목명_summary.mp3
-  NN_종목명_2_chart.png      → stock_종목명_chart.mp3
-  NN_종목명_3_mention.png    → stock_종목명_mention.mp3
-  NN_종목명_3_mention_MM.png → stock_종목명_mention_MM.mp3
-  90_extra_watchlist.png     → stock_추가관심종목.mp3
-  91_today_pick.png          → stock_오늘의픽.mp3
-  92_brokerage_report.png    → stock_증권사리포트.mp3
-  98_ai_strategy.png         → ai_strategy.mp3
-  99_closing.png             → closing.mp3
+프레임 → 오디오 매핑 규칙 (증권사 리포트 종합 전용 재설계 후 고정 3섹션):
+  00_opening.png   → opening.mp3
+  01_briefing.png  → briefing.mp3
+  99_closing.png   → closing.mp3
 
 자막 처리:
   - ASS burn-in 방식: ffmpeg libass 필터로 자막을 영상에 직접 합성
@@ -30,10 +21,10 @@ import re
 import subprocess
 import urllib.request
 
-# 목표 길이 설정
-TARGET_MIN = float(os.environ.get("TARGET_MIN_SECONDS", "870"))   # 14분 30초
-TARGET_MAX = float(os.environ.get("TARGET_MAX_SECONDS", "930"))   # 15분 30초
-TARGET_IDEAL = 900.0  # 15분 정확
+# 목표 길이 설정 — 증권사 리포트 종합 전용 재설계로 고정 미드폼(5~8분)
+TARGET_MIN = float(os.environ.get("TARGET_MIN_SECONDS", "300"))   # 5분
+TARGET_MAX = float(os.environ.get("TARGET_MAX_SECONDS", "480"))   # 8분
+TARGET_IDEAL = 390.0  # 6분 30초(중간값) — 배속 보정의 목표 기준점
 
 # BGM 볼륨 설정 (0.0~1.0)
 BGM_URL    = os.environ.get("BGM_URL", "")
@@ -79,16 +70,7 @@ def get_audio_duration(mp3_path: str) -> float:
 def _frame_stem_to_audio_id(stem: str, sections: list) -> str:
     fixed_patterns = [
         (r'^00_opening$',           'opening'),
-        (r'^01_market',             'market_summary'),
-        (r'^02_sector',             'sectors'),
-        (r'^02_recap$',             'recap'),       # video_format in (mid, full) 전용
-        (r'^03_reaction$',          'reaction'),    # video_format in (mid, full) 전용
-        (r'^04_briefing$',          'briefing'),    # video_format in (mid, full) 전용
-        (r'^05_highlight$',         'highlight'),   # video_format=="shorts" 전용
-        (r'^90_extra_watchlist$',   'stock_추가관심종목'),
-        (r'^91_today_pick$',        'stock_오늘의픽'),
-        (r'^92_brokerage_report$',  'stock_증권사리포트'),
-        (r'^98_ai_strategy',        'ai_strategy'),
+        (r'^01_briefing$',          'briefing'),
         (r'^99_closing',            'closing'),
     ]
     for pattern, audio_id in fixed_patterns:

@@ -2,10 +2,12 @@
 """
 YouTube 업로드 메타데이터(제목/썸네일/설명문/태그) + output/YYYY-MM-DD/metadata.json 생성.
 
-script.json + config/schedule.yml(briefing_type/video_format)을 입력으로 받아
-결정적 템플릿으로 제목/설명/태그를 만든다(LLM 호출 없음 — 비용/복잡도 최소화,
-필요시 후속 단계에서 LLM 기반으로 고도화 가능). 썸네일은
+script.json + config/schedule.yml(briefing_type)을 입력으로 받아 결정적
+템플릿으로 제목/설명/태그를 만든다(LLM 호출 없음). 썸네일은
 pipeline/assets/builders.build_thumbnail()로 렌더링한다.
+
+재설계: video_format(shorts/mid/full) 티어를 폐기하고 고정 미드폼 단일
+템플릿으로 통일했다.
 
 fallback: script.json이 없거나 비어있으면 status="failed"로 최소한의
 metadata.json만 남기고 종료한다(빈 배포 폴더가 아예 없는 것보다, 왜 실패했는지
@@ -23,18 +25,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from config_schedule import BRIEFING_TYPE, DEFAULT_VIDEO_FORMAT
+from config_schedule import BRIEFING_TYPE
 
 KST = timezone(timedelta(hours=9))
 
-TITLE_TEMPLATES = {
-    "morning_core":          "[개장전 브리핑] {date} 주식시장 오늘의 주도주는? | KBS 머니올라",
-    "report_update_full":    "[장중 업데이트] {date} 증권사 리포트 총정리 | KBS 머니올라",
-    "report_update_mid":     "[장중 업데이트] {date} 오전장 반응 + 리포트 브리핑 | KBS 머니올라",
-    "report_update_shorts":  "[속보] {date} 증권사가 주목한 종목 | KBS 머니올라",
-}
+TITLE_TEMPLATE = "[증권사 리포트 브리핑] {date} 오늘 리포트 총정리 | KBS 머니올라"
 
-BASE_TAGS = ["주식", "주식브리핑", "증시", "코스피", "코스닥", "KBS머니올라", "재테크"]
+BASE_TAGS = ["주식", "주식브리핑", "증시", "코스피", "코스닥", "KBS머니올라", "재테크", "증권사리포트"]
 
 
 def _kdate_to_iso(date_str: str) -> str:
@@ -45,42 +42,37 @@ def _kdate_to_iso(date_str: str) -> str:
     return f"{y}-{int(mo):02d}-{int(d):02d}"
 
 
-def _template_key(video_format: str) -> str:
-    if BRIEFING_TYPE == "morning_core":
-        return "morning_core"
-    return f"report_update_{video_format}"
+def build_title(script: dict, date_iso: str) -> str:
+    return TITLE_TEMPLATE.format(date=date_iso)
 
 
-def build_title(script: dict, date_iso: str, video_format: str) -> str:
-    key = _template_key(video_format)
-    template = TITLE_TEMPLATES.get(key, TITLE_TEMPLATES["morning_core"])
-    return template.format(date=date_iso)
+def _briefing_item_names(script: dict) -> list:
+    sections = script.get("sections", [])
+    briefing_sec = next((s for s in sections if s.get("id") == "briefing"), {})
+    names = []
+    for it in briefing_sec.get("items", []) or []:
+        name = (it.get("name", "") if isinstance(it, dict) else str(it)).lstrip("🎯💎 —-").strip()
+        if name:
+            names.append(name)
+    return names
 
 
 def build_description(script: dict) -> str:
     sections = script.get("sections", [])
-    market_sec = next((s for s in sections if s.get("id") == "market_summary"), {})
-    corner = market_sec.get("corner_summary", "")
-
-    stock_names = []
-    for s in sections:
-        sid = s.get("id", "")
-        if sid.startswith("stock_") and not sid.startswith("stock_추가") \
-                and not sid.startswith("stock_오늘") and not sid.startswith("stock_증권사"):
-            name = sid.replace("stock_", "")
-            if name:
-                stock_names.append(name)
+    briefing_sec = next((s for s in sections if s.get("id") == "briefing"), {})
+    corner = briefing_sec.get("corner_summary", "")
+    stock_names = _briefing_item_names(script)
 
     lines = []
     if corner:
         lines.append(corner)
     if stock_names:
         lines.append("")
-        lines.append("오늘 다룬 종목: " + ", ".join(stock_names[:10]))
+        lines.append("오늘 다룬 종목/테마: " + ", ".join(stock_names[:10]))
     lines.append("")
     lines.append(
-        "본 영상은 AI가 공개 데이터를 분석한 참고용 정보입니다. 특정 종목의 매수·매도"
-        " 권유가 아니며, 투자 결정과 그 책임은 전적으로 투자자 본인에게 있습니다."
+        "본 영상은 AI가 공개된 증권사 리포트·뉴스를 종합해 전달하는 참고용 정보입니다. "
+        "특정 종목의 매수·매도 권유가 아니며, 투자 결정과 그 책임은 전적으로 투자자 본인에게 있습니다."
     )
     return "\n".join(lines)
 
@@ -89,14 +81,7 @@ def build_tags(script: dict) -> list:
     sections = script.get("sections", [])
     opening = next((s for s in sections if s.get("id") == "opening"), {})
     keywords = opening.get("keywords", []) or []
-
-    stock_names = []
-    for s in sections:
-        sid = s.get("id", "")
-        if sid.startswith("stock_") or sid.startswith("hidden_"):
-            name = sid.replace("stock_", "").replace("hidden_", "")
-            if name and not name.startswith(("추가", "오늘", "증권")):
-                stock_names.append(name)
+    stock_names = _briefing_item_names(script)
 
     tags = BASE_TAGS + keywords + stock_names[:10]
     seen, out = set(), []
@@ -126,7 +111,6 @@ def write_fallback_metadata(out_dir: str, status: str, warnings: list):
     os.makedirs(out_dir, exist_ok=True)
     meta = {
         "briefing_type": BRIEFING_TYPE,
-        "video_format":  DEFAULT_VIDEO_FORMAT,
         "generated_at":  datetime.now(KST).isoformat(),
         "status":        status,
         "warnings":      warnings,
@@ -150,26 +134,26 @@ def run(lang: str = "KO"):
     with open(script_path, "r", encoding="utf-8") as f:
         script = json.load(f)
 
-    # video_format(shorts|mid|full)은 stock-briefing-v3-2가 이미 리포트
-    # 볼륨 기준으로 결정해 script.json에 기록해둔 값을 그대로 쓴다(step2에서
-    # 재계산하지 않음). morning_core(step1)는 이 필드를 쓰지 않으므로 config의
-    # 기본값으로 자연히 폴백된다.
-    video_format = script.get("video_format", DEFAULT_VIDEO_FORMAT)
-
     date_iso = _kdate_to_iso(script.get("date", ""))
     out_dir  = os.path.join(root, "output", date_iso)
     os.makedirs(out_dir, exist_ok=True)
 
     warnings = []
-    title       = build_title(script, date_iso, video_format)
+    title       = build_title(script, date_iso)
     description = build_description(script)
     tags        = build_tags(script)
 
-    # 썸네일
+    # media_map.json이 있으면 썸네일도 오프닝과 같은 배경 사진을 재사용한다.
+    media_map = {}
+    media_map_path = os.path.join(root, "output", lang, "media", "media_map.json")
+    if os.path.isfile(media_map_path):
+        with open(media_map_path, encoding="utf-8") as f:
+            media_map = json.load(f)
+
     from assets.builders import build_thumbnail
     thumbnail_path = os.path.join(out_dir, "thumbnail.png")
     try:
-        build_thumbnail(script, title, thumbnail_path)
+        build_thumbnail(script, title, thumbnail_path, media_map=media_map)
     except Exception as e:
         print(f"⚠️ 썸네일 생성 실패: {e}")
         warnings.append(f"썸네일 생성 실패: {e}")
@@ -190,16 +174,11 @@ def run(lang: str = "KO"):
     script_dst = os.path.join(out_dir, "script.json")
     shutil.copy2(script_path, script_dst)
 
-    core_stock_count = sum(
-        1 for s in script.get("sections", [])
-        if s.get("id", "").startswith(("stock_", "hidden_"))
-        and not s.get("id", "").startswith(("stock_추가", "stock_오늘", "stock_증권사"))
-    )
+    core_stock_count = len(_briefing_item_names(script))
 
     status = "success" if video_dst_rel else "partial"
     meta = {
         "briefing_type":   BRIEFING_TYPE,
-        "video_format":    video_format,
         "briefing_date":   date_iso,
         "generated_at":    datetime.now(KST).isoformat(),
         "status":          status,
