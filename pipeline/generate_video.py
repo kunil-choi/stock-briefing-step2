@@ -163,14 +163,14 @@ def concat_videos(video_list: list, out_path: str) -> bool:
     return True
 
 
-# ── 영상 길이 조정 (15분에 맞추기) ───────────────────────────────────────
+# ── 영상 길이 조정 (5~8분 고정 미드폼에 맞추기) ─────────────────────────
 
 def adjust_to_target_duration(input_path: str, output_path: str,
                                current_duration: float) -> float:
     """
-    영상 길이를 목표 시간(15분)에 맞게 조정합니다.
+    영상 길이를 목표 시간(5~8분)에 맞게 조정합니다.
     - 너무 짧으면 (< 14분30초): 마지막 프레임 반복으로 늘림
-    - 너무 길면 (> 15분30초): 속도 미세 조정으로 줄임
+    - 너무 길면 (> TARGET_MAX): 속도 미세 조정으로 줄임
     - 범위 내이면: 그대로 유지
 
     반환값: 적용된 배속(speed factor). 1.0이면 배속 조정 없음(패딩만 적용됐거나
@@ -322,7 +322,7 @@ def run(lang: str = "KO"):
         script = json.load(f)
     sections = script.get("sections", [])
     print(f"📂 섹션 수: {len(sections)}")
-    print(f"🎯 방송 목표 길이: 15분 ({TARGET_MIN:.0f}~{TARGET_MAX:.0f}초)")
+    print(f"🎯 방송 목표 길이: {TARGET_MIN/60:.0f}~{TARGET_MAX/60:.0f}분 ({TARGET_MIN:.0f}~{TARGET_MAX:.0f}초)")
 
     if not os.path.isfile(asset_map_path):
         print("❌ asset_map.json 없음"); sys.exit(1)
@@ -379,7 +379,7 @@ def run(lang: str = "KO"):
     if not concat_videos(section_videos, merged_path):
         sys.exit(1)
 
-    # ── 15분 길이 조정 ─────────────────────────────────────────────────
+    # ── 목표 길이 조정 ─────────────────────────────────────────────────
     print(f"\n⏱ 영상 길이 조정 중...\n")
     merged_duration = get_audio_duration(merged_path)
     adjusted_path = os.path.join(video_dir, "adjusted.mp4")
@@ -435,7 +435,7 @@ def run(lang: str = "KO"):
     print(f"✅ 최종 영상 완성!")
     print(f"   파일: {final_path}")
     print(f"   크기: {size_mb:.1f} MB")
-    print(f"   길이: {mins}분 {secs}초 (목표: 15분)")
+    print(f"   길이: {mins}분 {secs}초 (목표: {TARGET_MIN/60:.0f}~{TARGET_MAX/60:.0f}분)")
     if not (TARGET_MIN <= total_duration <= TARGET_MAX):
         print(f"   ⚠️ 경고: 목표 길이({int(TARGET_MIN//60)}분~{int(TARGET_MAX//60)}분)를 벗어났습니다")
     print(f"{'='*50}\n")
