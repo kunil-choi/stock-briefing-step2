@@ -5,12 +5,14 @@ import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 
-TARGET_MIN_SECONDS = int(os.environ.get("TARGET_MIN_SECONDS", "870"))
-TARGET_MAX_SECONDS = int(os.environ.get("TARGET_MAX_SECONDS", "930"))
+from config_schedule import DURATION
+
+TARGET_MIN_SECONDS = int(os.environ.get("TARGET_MIN_SECONDS", str(DURATION.get("min_seconds", 300))))
+TARGET_MAX_SECONDS = int(os.environ.get("TARGET_MAX_SECONDS", str(DURATION.get("max_seconds", 480))))
 
 KST = timezone(timedelta(hours=9))
 REQUIRED_METADATA_FIELDS = [
-    "briefing_type", "video_format", "briefing_date", "status",
+    "briefing_type", "briefing_date", "status",
     "title", "description", "tags",
 ]
 
@@ -31,68 +33,12 @@ def check_metadata(root: str = ".") -> None:
     if meta.get("status") not in ("success", "partial"):
         raise SystemExit(f"metadata.json status={meta.get('status')!r} — 실패로 표시됨 ({meta_path})")
 
-    # video_format에 맞는 길이 범위로 검증 (shorts/mid/full 3단계 티어)
-    try:
-        from config_schedule import duration_for
-        bounds = duration_for(meta.get("video_format", "shorts"))
-    except Exception:
-        bounds = {"min_seconds": TARGET_MIN_SECONDS, "max_seconds": TARGET_MAX_SECONDS}
-
     duration = meta.get("duration_seconds", 0)
-    if duration and not (bounds["min_seconds"] <= duration <= bounds["max_seconds"]):
+    if duration and not (TARGET_MIN_SECONDS <= duration <= TARGET_MAX_SECONDS):
         print(f"⚠️  metadata.json duration_seconds={duration}가 목표 범위"
-              f"({bounds['min_seconds']}~{bounds['max_seconds']}s)를 벗어남 — 경고만 출력")
+              f"({TARGET_MIN_SECONDS}~{TARGET_MAX_SECONDS}s)를 벗어남 — 경고만 출력")
 
     print(f"✅ metadata.json 검증 통과 ({meta_path}, status={meta['status']})")
-
-# 스크립트 생성 프롬프트의 예시 스키마 값이 실제 값 대신 그대로 출력에 남는
-# 사고(과거 "₩000,000 / 현대차 한줄 요약"가 화면에 그대로 노출된 사례)를 화면에
-# 실리기 전에 걸러낸다.
-# ★ "+0.00%"는 여기 포함하지 않는다 — generate_script.py가 종목 price/change를
-# V3_2 원본 시세로 채우는데, 오전장 반영 이전이면 change_pct가 실제로 0.00%인
-# 종목이 있을 수 있다(stock-briefing-step1에서 실제로 겪은 오탐 사고).
-_PLACEHOLDER_LITERALS = {"000,000", "한줄 요약"}
-
-# 추가 관심 종목/오늘의 픽/증권사 리포트는 종목 1개짜리 카드가 아니라
-# items:[{name,text}] 리스트 구조라서 price/change/summary/corner_summary
-# 필드 자체가 없다 — id가 "stock_"로 시작한다고 개별 종목 카드와 똑같이
-# 검사하면 정상 섹션이 매번 "빈 값"으로 오탐된다.
-AGGREGATE_STOCK_SECTION_IDS = {"stock_추가관심종목", "stock_오늘의픽", "stock_증권사리포트"}
-
-
-def check_no_placeholder_content(script_path: str) -> None:
-    """script.json의 종목 섹션에 미채움 placeholder 문구나 빈 값이 남아있지
-    않은지 검사한다. 하나라도 발견되면 화면에 그대로 노출되기 전에 파이프라인을
-    중단시킨다. video_format=="shorts"인 날은 종목 섹션 자체가 없어 자연히
-    통과한다."""
-    sections = json.load(open(script_path, encoding="utf-8")).get("sections", [])
-    offenders = []
-    for sec in sections:
-        sid = sec.get("id", "")
-        if sid in AGGREGATE_STOCK_SECTION_IDS:
-            continue
-        if not (sid.startswith("stock_") or sid.startswith("hidden_")):
-            continue
-        stock_name = sid.split("_", 1)[-1]
-        # price/change: 실제 값이 있어야 한다(비어있으면 stock_market_data 조회가
-        # 실패했다는 뜻). "000,000"처럼 값 자체가 명백한 placeholder인 경우도 포함.
-        for field in ("price", "change"):
-            value = str(sec.get(field, "")).strip()
-            if not value or value in _PLACEHOLDER_LITERALS:
-                offenders.append(f"{sid}.{field}={value!r}")
-        # summary/corner_summary: LLM이 스키마 예시를 그대로 베낀 경우를 잡는다.
-        for field in ("summary", "corner_summary"):
-            value = str(sec.get(field, "")).strip()
-            if not value or value in _PLACEHOLDER_LITERALS or value == f"{stock_name} 한줄 요약":
-                offenders.append(f"{sid}.{field}={value!r}")
-
-    if offenders:
-        print("❌ placeholder 미채움 콘텐츠 발견:")
-        for o in offenders:
-            print(f"  {o}")
-        raise SystemExit(f"placeholder 콘텐츠가 화면에 노출될 위험 — {len(offenders)}건 ({script_path})")
-
-    print(f"✅ placeholder 미채움 콘텐츠 없음 확인 ({script_path})")
 
 
 def media_duration(path: str) -> float:
@@ -117,15 +63,9 @@ def main(lang: str = "KO"):
 
     if not os.path.isfile(asset_map):
         raise SystemExit(f"asset_map.json 없음: {asset_map}")
-    if os.path.isfile(script_path):
-        check_no_placeholder_content(script_path)
 
     # frame stem → audio_id 매핑은 generate_subtitles.py가 이미 갖고 있는 검증된
-    # 로직을 그대로 재사용한다(stock-briefing-step1과 동일한 패턴). 이 파일에
-    # 독립적으로 재구현돼 있던 예전 버전은 mention 페이지처럼 세그먼트 수가
-    # 다른 stem에서 슬라이싱 오프셋이 어긋나(예: "10_삼성전자_3_mention_00" →
-    # 잘못된 "stock_삼성전자_3_mention_00") 실제로 존재하는 mp3와 이름이 달라
-    # "누락 오디오"로 오판하는 버그가 있었다(드라이런 중 실제로 재현·발견됨).
+    # 로직을 그대로 재사용한다.
     from generate_subtitles import _frame_stem_to_audio_id
 
     sections = json.load(open(script_path, encoding="utf-8")).get("sections", []) if os.path.isfile(script_path) else []

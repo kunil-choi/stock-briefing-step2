@@ -1,9 +1,22 @@
 """
 pipeline/generate_voice.py
-TTS 생성 모듈 — OpenAI TTS (nova, 여성)
+TTS 생성 모듈 — 프리미엄 TTS 파이프라인(stock-briefing-step1 이식)
+
+provider_priority(config/audio.yml, 기본 azure→elevenlabs→openai) 순서로
+합성을 시도한다. ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID(pipeline/
+update_voice_id.py로 voice_sample/에서 미리 만들어둔 클론 목소리)가 등록되면
+자동으로 클론 목소리를 쓰고, 없으면 OpenAI TTS로 폴백한다(코드 변경 불필요).
+합성 후에는 loudnorm으로 방송 표준 음량(-16 LUFS)에 맞추고, 투자 권유처럼
+들리는 과장 표현을 탐지(치환 없이 경고만)해 output/{lang}/audio_report.json에
+기록한다.
+
+이 레포는 script.json이 opening/briefing/closing 3섹션으로 고정돼 있어(리캡/
+오전장반응/AI전략 업데이트 제거, shorts 분기 폐기), stock-briefing-step1의
+_build_jobs()처럼 종목별 페이지 분기가 필요 없다 — 섹션당 오디오 1개.
 """
 import os
 import json
+import shutil
 import time
 import sys
 
@@ -11,117 +24,77 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from voice_config import apply_phoneme_rules
-
-OPENAI_VOICE = "nova"       # nova(여성) / onyx(남성) / alloy / echo / fable / shimmer
-OPENAI_MODEL = "tts-1-hd"  # tts-1(빠름) / tts-1-hd(고품질)
-
-
-TTS_MOCK = os.environ.get("TTS_MOCK") == "1"
-
-
-def _mock_text_to_speech(text: str, output_path: str) -> bool:
-    """TTS_MOCK=1 드라이런 전용. 실제 TTS를 호출하지 않고, 텍스트 길이에
-    비례한 길이의 무음에 가까운 저음량 톤 mp3를 ffmpeg로 만든다(OpenAI 비용
-    없이 후속 파이프라인을 실제 오디오 파일로 검증하기 위함 —
-    stock-briefing-step1과 동일한 드라이런 스위치)."""
-    import subprocess
-    duration = max(1.0, len(text) / 5.5)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y", "-f", "lavfi",
-        "-i", f"sine=frequency=220:duration={duration:.2f}",
-        "-af", "volume=0.05",
-        "-c:a", "libmp3lame", "-b:a", "128k",
-        output_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  ❌ [tts:mock] 더미 오디오 생성 실패: {result.stderr[-300:]}")
-        return False
-    return True
-
-
-def text_to_speech(text: str, output_path: str) -> bool:
-    """OpenAI TTS로 텍스트를 MP3로 변환합니다."""
-    if TTS_MOCK:
-        return _mock_text_to_speech(text, output_path)
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("  ❌ openai 패키지가 없습니다. pip install openai")
-        return False
-
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        print("  ❌ OPENAI_API_KEY 환경변수가 없습니다.")
-        return False
-
-    client = OpenAI(api_key=api_key)
-    processed_text = apply_phoneme_rules(text)
-
-    try:
-        response = client.audio.speech.create(
-            model=OPENAI_MODEL,
-            voice=OPENAI_VOICE,
-            input=processed_text,
-            response_format="mp3",
-            speed=1.0,
-        )
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "wb") as f:
-            f.write(response.content)
-        return True
-    except Exception as e:
-        print(f"  ❌ OpenAI TTS 실패: {e}")
-        return False
-
-
-AGGREGATE_STOCK_SECTION_IDS = {"stock_추가관심종목", "stock_오늘의픽", "stock_증권사리포트"}
+from config_audio import (
+    apply_pronunciation_rules, build_providers,
+    LOUDNESS_TARGET_LUFS, LOUDNESS_TRUE_PEAK, LOUDNESS_RANGE,
+)
+from assets.tts_providers import synthesize_with_fallback
+from assets.audio_post import (
+    apply_post_processing, measure_duration, measure_loudness,
+    detect_advice_language, build_audio_report,
+)
 
 
 def _build_jobs(sections: list, lang: str) -> list:
     jobs = []
     audio_base = f"output/{lang}/audio"
-
     for section in sections:
         sid   = section.get("id", "")
         label = section.get("label", sid)
-        if not sid:
-            continue
-
-        is_stock = (
-            (sid.startswith("stock_") or sid.startswith("hidden_"))
-            and sid not in AGGREGATE_STOCK_SECTION_IDS
-        )
-
-        if is_stock:
-            text = section.get("narration_summary", section.get("narration", ""))
-            if text:
-                jobs.append((text, f"{audio_base}/{sid}_summary.mp3", f"{label} [summary]"))
-
-            # channel_summaries: 종목당 최대 3개(유튜브/경제방송/증권사) 카테고리별
-            # 종합 분석 요약 — 한 항목당 오디오 1개(페이지 인덱스 = 배열 인덱스)
-            for p, cs in enumerate(section.get("channel_summaries", [])):
-                text = cs.get("narration", "")
-                if text:
-                    label_suffix = cs.get("channel_type", f"mention_page{p}")
-                    jobs.append((text, f"{audio_base}/{sid}_mention_{p:02d}.mp3", f"{label} [{label_suffix}]"))
-        else:
-            narration = section.get("narration", "")
-            if narration:
-                jobs.append((narration, f"{audio_base}/{sid}.mp3", label))
-
+        narration = section.get("narration", "")
+        if sid and narration:
+            jobs.append((narration, f"{audio_base}/{sid}.mp3", label))
     return jobs
+
+
+def _synthesize_job(providers, text: str, out_path: str, job_id: str) -> dict:
+    """provider 폴백 체인으로 합성 → loudnorm 후처리 → 실측치/경고를 담은
+    audio_report 엔트리를 반환한다."""
+    warnings = detect_advice_language(text)
+    processed_text = apply_pronunciation_rules(text)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    raw_path = out_path + ".raw.mp3"
+    ok, provider_name = synthesize_with_fallback(providers, processed_text, raw_path)
+
+    if not ok:
+        return {
+            "id": job_id, "provider": "", "duration_seconds": 0.0,
+            "speed": 1.0, "loudness_lufs": None, "warnings": warnings, "success": False,
+        }
+
+    post_ok = apply_post_processing(
+        raw_path, out_path, speed=1.0,
+        target_lufs=LOUDNESS_TARGET_LUFS, true_peak=LOUDNESS_TRUE_PEAK,
+        loudness_range=LOUDNESS_RANGE,
+    )
+    if not post_ok:
+        print("    ⚠️ 후처리(loudnorm) 실패 → 원본 합성 파일 그대로 사용")
+        shutil.move(raw_path, out_path)
+    elif os.path.isfile(raw_path):
+        os.remove(raw_path)
+
+    duration = measure_duration(out_path)
+    loudness = measure_loudness(out_path)
+    return {
+        "id": job_id, "provider": provider_name, "duration_seconds": round(duration, 2),
+        "speed": 1.0, "loudness_lufs": loudness, "warnings": warnings, "success": True,
+    }
 
 
 def run(lang: str = "KO"):
     lang = lang.upper()
 
-    if not os.environ.get("OPENAI_API_KEY") and not TTS_MOCK:
-        raise EnvironmentError("❌ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+    providers = build_providers()
+    configured = [p.name for p in providers if p.is_configured()]
+    if not configured:
+        raise EnvironmentError(
+            "❌ 사용 가능한 TTS provider가 없습니다. OPENAI_API_KEY(또는 "
+            "AZURE_SPEECH_KEY/AZURE_SPEECH_REGION, ELEVENLABS_API_KEY) 환경변수를 "
+            "설정하세요."
+        )
 
-    print(f"🎙️ TTS 엔진: {'MOCK(드라이런)' if TTS_MOCK else f'OpenAI TTS ({OPENAI_MODEL} / {OPENAI_VOICE})'}")
+    print(f"🎙️ TTS provider 우선순위: {[p.name for p in providers]} (사용 가능: {configured})")
     print(f"📁 출력 언어: {lang}")
 
     script_path = f"output/{lang}/scripts/script.json"
@@ -135,21 +108,26 @@ def run(lang: str = "KO"):
 
     success_count = 0
     audio_files   = []
+    report_entries = []
 
     for i, (text, out_path, label) in enumerate(jobs, 1):
         print(f"  [{i}/{total}] {label}")
         print(f"    내용: {text[:60]}...")
 
-        success = text_to_speech(text, out_path)
+        job_id = os.path.splitext(os.path.basename(out_path))[0]
+        entry = _synthesize_job(providers, text, out_path, job_id)
+        success = entry.pop("success")
 
         if success:
-            print(f"    ✅ 완료 → {out_path}")
+            print(f"    ✅ 완료 → {out_path} (provider={entry['provider']}, "
+                  f"{entry['duration_seconds']:.1f}s, {entry['loudness_lufs']}LUFS)")
             success_count += 1
             audio_files.append({"label": label, "path": out_path})
         else:
             print(f"    ❌ 실패 → {out_path}")
 
-        time.sleep(0.3)  # OpenAI는 rate limit 여유 있음
+        report_entries.append(entry)
+        time.sleep(0.3)  # rate limit 여유
 
     summary = {
         "total":   total,
@@ -161,6 +139,13 @@ def run(lang: str = "KO"):
     os.makedirs(os.path.dirname(summary_path), exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    audio_report = build_audio_report(report_entries)
+    report_path = f"output/{lang}/audio_report.json"
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(audio_report, f, ensure_ascii=False, indent=2)
+    print(f"📄 오디오 리포트 저장: {report_path} "
+          f"(과장 표현 경고 {audio_report['total_advice_language_warnings']}건)")
 
     print(f"\n{'='*40}")
     print(f"🎉 TTS 완료! 성공: {success_count}/{total}개")
